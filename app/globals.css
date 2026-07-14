@@ -968,14 +968,14 @@ textarea.input-error:focus {
 .preview-iframe-wrap {
   position: relative;
   width: 100%;
+  height: 100%;
 }
 
 .preview-iframe {
   width: 100%;
-  height: 8000px;
+  height: 100%;
   border: none;
   background: #fff;
-  overflow: hidden;
 }
 
 .preview-overlay {
