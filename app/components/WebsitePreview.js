@@ -95,6 +95,7 @@ export default function WebsitePreview({
   onDelete,
   onReply,
   isGuest = false,
+  viewMode = "desktop",
 }) {
   const [loading, setLoading] = useState(true);
   const overlayRef = useRef(null);
@@ -341,8 +342,10 @@ export default function WebsitePreview({
     );
   };
 
+  const isMobile = viewMode === "mobile";
+
   return (
-    <div className="preview-panel">
+    <div className={`preview-panel${isMobile ? " preview-panel--mobile" : ""}`}>
       {loading && (
         <div className="preview-loading">
           <div className="preview-spinner" />
@@ -350,25 +353,48 @@ export default function WebsitePreview({
         </div>
       )}
 
-      <div
-        className="preview-iframe-wrap"
-        style={{
-          transform: `scale(${zoom / 100})`,
-          transformOrigin: "top left",
-          width: `${10000 / zoom}%`,
-          height: `${10000 / zoom}%`,
-        }}
-      >
-        <iframe
-          ref={iframeRef}
-          src={proxyUrl}
-          className="preview-iframe"
-          title="Website preview"
-          onLoad={() => setLoading(false)}
-          onError={() => setLoading(false)}
-        />
-        {renderOverlay()}
-      </div>
+      {isMobile ? (
+        <div className="mobile-device-frame">
+          <div className="mobile-device-notch" />
+          <div
+            className="preview-iframe-wrap preview-iframe-wrap--mobile"
+            style={{
+              transform: `scale(${zoom / 100})`,
+              transformOrigin: "top center",
+            }}
+          >
+            <iframe
+              ref={iframeRef}
+              src={proxyUrl}
+              className="preview-iframe"
+              title="Website preview (mobile)"
+              onLoad={() => setLoading(false)}
+              onError={() => setLoading(false)}
+            />
+            {renderOverlay()}
+          </div>
+        </div>
+      ) : (
+        <div
+          className="preview-iframe-wrap"
+          style={{
+            transform: `scale(${zoom / 100})`,
+            transformOrigin: "top left",
+            width: `${10000 / zoom}%`,
+            height: `${10000 / zoom}%`,
+          }}
+        >
+          <iframe
+            ref={iframeRef}
+            src={proxyUrl}
+            className="preview-iframe"
+            title="Website preview"
+            onLoad={() => setLoading(false)}
+            onError={() => setLoading(false)}
+          />
+          {renderOverlay()}
+        </div>
+      )}
     </div>
   );
 }

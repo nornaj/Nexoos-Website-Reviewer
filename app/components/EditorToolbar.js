@@ -19,6 +19,8 @@ export default function EditorToolbar({
   onZoomChange,
   onShare,
   isGuest = false,
+  viewMode = "desktop",
+  onViewModeChange,
 }) {
   const zoomLevels = [50, 75, 100, 125, 150];
 
@@ -45,6 +47,32 @@ export default function EditorToolbar({
           </div>
         )}
         <span className="editor-project-name">{projectName}</span>
+
+        <div className="device-toggle">
+          <button
+            className={`device-toggle-btn${viewMode === "desktop" ? " active" : ""}`}
+            onClick={() => onViewModeChange?.("desktop")}
+            title="Desktop view"
+            id="device-desktop"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <line x1="8" y1="21" x2="16" y2="21" />
+              <line x1="12" y1="17" x2="12" y2="21" />
+            </svg>
+          </button>
+          <button
+            className={`device-toggle-btn${viewMode === "mobile" ? " active" : ""}`}
+            onClick={() => onViewModeChange?.("mobile")}
+            title="Mobile view"
+            id="device-mobile"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="2" width="14" height="20" rx="2" />
+              <line x1="12" y1="18" x2="12" y2="18" strokeWidth="3" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div className="editor-toolbar-center">

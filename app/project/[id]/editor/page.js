@@ -29,14 +29,15 @@ export default function EditorPage() {
   const [zoom, setZoom] = useState(100);
   const [comments, setComments] = useState([]);
   const [activeCommentId, setActiveCommentId] = useState(null);
+  const [viewMode, setViewMode] = useState("desktop");
   const [popup, setPopup] = useState({ open: false, type: null, position: null, annotationData: null });
 
   // Load comments
   useEffect(() => {
     if (project) {
-      getCommentsByProject(project.id).then(setComments);
+      getCommentsByProject(project.id, viewMode).then(setComments);
     }
-  }, [project]);
+  }, [project, viewMode]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -71,10 +72,10 @@ export default function EditorPage() {
 
   const refreshComments = useCallback(async () => {
     if (project) {
-      const data = await getCommentsByProject(project.id);
+      const data = await getCommentsByProject(project.id, viewMode);
       setComments(data);
     }
-  }, [project]);
+  }, [project, viewMode]);
 
   const handleAnnotationAdd = useCallback(
     (data) => {
@@ -104,6 +105,7 @@ export default function EditorPage() {
         text: text || "",
         author: user?.name || "Reviewer",
         position: popup.annotationData.position,
+        view_mode: viewMode,
       });
 
       await refreshComments();
@@ -124,6 +126,7 @@ export default function EditorPage() {
         text,
         author: user?.name || "Reviewer",
         position: null,
+        view_mode: viewMode,
       });
       await refreshComments();
     },
@@ -192,6 +195,8 @@ export default function EditorPage() {
         zoom={zoom}
         onZoomChange={setZoom}
         onShare={handleShare}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
       />
 
       <div className="editor-body">
@@ -206,6 +211,7 @@ export default function EditorPage() {
           onResolve={handleResolve}
           onDelete={handleDelete}
           onReply={handleReply}
+          viewMode={viewMode}
         />
 
         <CommentsSidebar

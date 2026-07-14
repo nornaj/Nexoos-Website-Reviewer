@@ -27,20 +27,21 @@ export default function PublicReviewPage() {
   const [comments, setComments] = useState([]);
   const [activeCommentId, setActiveCommentId] = useState(null);
   const [guestName, setGuestName] = useState("");
+  const [viewMode, setViewMode] = useState("desktop");
   const [popup, setPopup] = useState({ open: false, type: null, position: null, annotationData: null });
 
   useEffect(() => {
     if (project) {
-      getCommentsByProject(project.id).then(setComments);
+      getCommentsByProject(project.id, viewMode).then(setComments);
     }
-  }, [project]);
+  }, [project, viewMode]);
 
   const refreshComments = useCallback(async () => {
     if (project) {
-      const data = await getCommentsByProject(project.id);
+      const data = await getCommentsByProject(project.id, viewMode);
       setComments(data);
     }
-  }, [project]);
+  }, [project, viewMode]);
 
   const authorName = guestName.trim() || "Guest";
 
@@ -71,6 +72,7 @@ export default function PublicReviewPage() {
         text: text || "",
         author: authorName,
         position: popup.annotationData.position,
+        view_mode: viewMode,
       });
 
       await refreshComments();
@@ -91,6 +93,7 @@ export default function PublicReviewPage() {
         text,
         author: authorName,
         position: null,
+        view_mode: viewMode,
       });
       await refreshComments();
     },
@@ -152,6 +155,8 @@ export default function PublicReviewPage() {
         onZoomChange={setZoom}
         onShare={handleShare}
         isGuest
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
       />
 
       <div className="editor-body">
@@ -167,6 +172,7 @@ export default function PublicReviewPage() {
           onDelete={() => {}}
           onReply={handleReply}
           isGuest
+          viewMode={viewMode}
         />
 
         <CommentsSidebar
