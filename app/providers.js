@@ -11,8 +11,8 @@ function AuthGuard({ children }) {
   const { isLoggedIn, loading } = useAuth();
   const pathname = usePathname();
 
-  // Share pages skip auth
-  if (pathname?.startsWith("/share/")) {
+  // Share/review pages skip auth (client-facing)
+  if (pathname?.startsWith("/share/") || pathname?.startsWith("/review/")) {
     return children;
   }
 
