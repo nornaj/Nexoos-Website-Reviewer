@@ -975,6 +975,7 @@ textarea.input-error:focus {
   height: 8000px;
   border: none;
   background: #fff;
+  overflow: hidden;
 }
 
 .preview-overlay {

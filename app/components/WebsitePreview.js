@@ -324,6 +324,7 @@ export default function WebsitePreview({
             className="preview-iframe"
             title="Website preview"
             sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
+            scrolling="no"
             onLoad={handleIframeLoad}
             onError={handleIframeError}
           />
