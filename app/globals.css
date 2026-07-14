@@ -156,6 +156,13 @@ h1.form-title {
   object-position: top;
 }
 
+.card-thumb-favicon {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: 10px;
+}
+
 .card-thumb-fallback {
   position: absolute;
   inset: 0;

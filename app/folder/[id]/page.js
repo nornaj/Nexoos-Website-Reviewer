@@ -108,10 +108,21 @@ export default function FolderPage() {
                 </svg>
               </button>
               <div className="card-thumb">
+                {project.url && (
+                  <img
+                    className="card-thumb-favicon"
+                    src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(new URL(project.url.startsWith("http") ? project.url : `https://${project.url}`).hostname)}&sz=128`}
+                    alt=""
+                    onError={(e) => {
+                      e.target.style.display = "none";
+                      e.target.nextSibling.style.display = "flex";
+                    }}
+                  />
+                )}
                 <div
                   className="card-thumb-fallback"
                   style={{
-                    display: "flex",
+                    display: project.url ? "none" : "flex",
                     background: `linear-gradient(135deg, ${getAvatarColor(project.name)[0]}, ${getAvatarColor(project.name)[1]})`,
                   }}
                 >
