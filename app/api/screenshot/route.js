@@ -7,8 +7,9 @@ import crypto from "crypto";
 
 const CACHE_DIR = path.join(process.cwd(), ".next", "cache", "screenshots");
 
-function getCachePath(url) {
-  const hash = crypto.createHash("md5").update(url).digest("hex");
+function getCachePath(url, fullPage) {
+  const key = fullPage ? `${url}__fullpage` : url;
+  const hash = crypto.createHash("md5").update(key).digest("hex");
   return path.join(CACHE_DIR, `${hash}.png`);
 }
 
@@ -36,6 +37,7 @@ function getLocalChromePath() {
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const url = searchParams.get("url");
+  const fullPage = searchParams.get("fullPage") === "true";
 
   if (!url) {
     return NextResponse.json({ error: "Missing url parameter" }, { status: 400 });
@@ -46,7 +48,7 @@ export async function GET(request) {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
   }
 
-  const cachePath = getCachePath(url);
+  const cachePath = getCachePath(url, fullPage);
 
   // Return cached screenshot if exists and less than 24h old
   if (fs.existsSync(cachePath)) {
@@ -102,10 +104,16 @@ export async function GET(request) {
     // Small delay for animations/lazy images
     await new Promise((r) => setTimeout(r, 800));
 
-    const screenshot = await page.screenshot({
-      type: "png",
-      clip: { x: 0, y: 0, width: 1280, height: 800 },
-    });
+    let screenshot;
+    if (fullPage) {
+      // Capture the full scrollable page
+      screenshot = await page.screenshot({ type: "png", fullPage: true });
+    } else {
+      screenshot = await page.screenshot({
+        type: "png",
+        clip: { x: 0, y: 0, width: 1280, height: 800 },
+      });
+    }
 
     await browser.close().catch(() => {});
 

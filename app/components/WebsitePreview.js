@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 function formatExactDate(timestamp) {
   const d = new Date(timestamp);
@@ -125,20 +125,53 @@ export default function WebsitePreview({
   isGuest = false,
 }) {
   const [loading, setLoading] = useState(true);
+  const [screenshotUrl, setScreenshotUrl] = useState(null);
   const [failed, setFailed] = useState(false);
   const overlayRef = useRef(null);
+  const scrollContainerRef = useRef(null);
   const [dragging, setDragging] = useState(null);
   const [hoveredPin, setHoveredPin] = useState(null);
   const hoverTimeout = useRef(null);
+  const didDragRef = useRef(false);
 
-  const handleIframeLoad = () => {
-    setLoading(false);
-  };
+  // Fetch full-page screenshot on mount
+  useEffect(() => {
+    if (!url) return;
+    setLoading(true);
+    setFailed(false);
 
-  const handleIframeError = () => {
-    setLoading(false);
-    setFailed(true);
-  };
+    const imgUrl = `/api/screenshot?url=${encodeURIComponent(url)}&fullPage=true`;
+
+    // Preload the image to check if it loads
+    const img = new Image();
+    img.onload = () => {
+      setScreenshotUrl(imgUrl);
+      setLoading(false);
+    };
+    img.onerror = () => {
+      setFailed(true);
+      setLoading(false);
+    };
+    img.src = imgUrl;
+  }, [url]);
+
+  // Scroll to annotation when clicking sidebar
+  useEffect(() => {
+    if (!activeCommentId || !scrollContainerRef.current) return;
+    const annotation = annotations.find((a) => a.id === activeCommentId);
+    if (!annotation?.position) return;
+
+    const container = scrollContainerRef.current;
+    const imgEl = container.querySelector(".preview-page-image");
+    if (!imgEl) return;
+
+    const scaleF = zoom / 100;
+    const targetY = (annotation.position.y / 100) * imgEl.naturalHeight * scaleF;
+    container.scrollTo({
+      top: targetY - container.clientHeight / 3,
+      behavior: "smooth",
+    });
+  }, [activeCommentId, annotations, zoom]);
 
   const handlePinEnter = (id) => {
     if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
@@ -160,6 +193,10 @@ export default function WebsitePreview({
   const handleOverlayClick = useCallback(
     (e) => {
       if (activeTool === "select") return;
+      if (didDragRef.current) {
+        didDragRef.current = false;
+        return;
+      }
 
       const rect = overlayRef.current.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * 100;
@@ -178,6 +215,7 @@ export default function WebsitePreview({
   const handleMouseDown = useCallback(
     (e) => {
       if (activeTool !== "highlight" && activeTool !== "approve") return;
+      didDragRef.current = false;
 
       const rect = overlayRef.current.getBoundingClientRect();
       const x = ((e.clientX - rect.left) / rect.width) * 100;
@@ -208,6 +246,7 @@ export default function WebsitePreview({
     const height = Math.abs(dragging.currentY - dragging.startY);
 
     if (width > 1 && height > 1) {
+      didDragRef.current = true;
       onAnnotationAdd({
         type: activeTool,
         position: {
@@ -245,11 +284,11 @@ export default function WebsitePreview({
   };
 
   return (
-    <div className="preview-panel">
+    <div className="preview-panel" ref={scrollContainerRef}>
       {loading && (
         <div className="preview-loading">
           <div className="preview-spinner" />
-          <span>Loading website preview…</span>
+          <span>Capturing full page screenshot…</span>
         </div>
       )}
 
@@ -257,7 +296,7 @@ export default function WebsitePreview({
         <div className="preview-fallback">
           <div className="preview-fallback-icon">🚫</div>
           <div className="preview-fallback-text">
-            This website cannot be embedded. It may be blocking iframe loading.
+            Failed to capture this website. It may be blocking screenshots.
           </div>
           <a
             href={url}
@@ -268,20 +307,24 @@ export default function WebsitePreview({
             Open in new tab ↗
           </a>
         </div>
-      ) : (
+      ) : screenshotUrl ? (
         <div
-          className="preview-iframe-wrap"
-          style={{ transform: `scale(${zoom / 100})`, transformOrigin: "top left", width: `${10000 / zoom}%`, height: `${10000 / zoom}%` }}
+          className="preview-screenshot-wrap"
+          style={{
+            transform: `scale(${zoom / 100})`,
+            transformOrigin: "top left",
+            width: `${10000 / zoom}%`,
+          }}
         >
-          <iframe
-            src={url}
-            className="preview-iframe"
-            title="Website preview"
-            sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
-            onLoad={handleIframeLoad}
-            onError={handleIframeError}
+          {/* Full-page screenshot as the visual layer */}
+          <img
+            src={screenshotUrl}
+            alt="Full page screenshot"
+            className="preview-page-image"
+            draggable={false}
           />
 
+          {/* Annotation overlay — matches the image size exactly */}
           <div
             ref={overlayRef}
             className={`preview-overlay${activeTool === "select" ? " mode-select" : ""}`}
@@ -351,7 +394,7 @@ export default function WebsitePreview({
             )}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

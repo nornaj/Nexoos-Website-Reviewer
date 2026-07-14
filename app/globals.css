@@ -965,17 +965,17 @@ textarea.input-error:focus {
   to { transform: rotate(360deg); }
 }
 
-.preview-iframe-wrap {
+.preview-screenshot-wrap {
   position: relative;
   width: 100%;
-  height: 100%;
 }
 
-.preview-iframe {
+.preview-page-image {
+  display: block;
   width: 100%;
-  height: 100%;
-  border: none;
-  background: #fff;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .preview-overlay {
