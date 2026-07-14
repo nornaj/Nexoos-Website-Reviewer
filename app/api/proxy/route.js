@@ -273,9 +273,141 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false) {
     html = `<head>${headInjection}</head>` + html;
   }
 
+  const targetOrigin = targetUrl.origin;
+  
   const injectedScript = `
 <script data-nexoos="true">
 (function() {
+  var TARGET_ORIGIN = '${targetOrigin}';
+  var ASSET_PROXY = '/api/asset?url=';
+
+  // ===== IMAGE PROXY: Permanent catch-all solution =====
+  
+  // Convert any URL to an absolute URL using the target origin
+  function resolveUrl(url) {
+    if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return null;
+    if (url.startsWith('//')) return 'https:' + url;
+    if (url.startsWith('/')) return TARGET_ORIGIN + url;
+    if (url.startsWith('http')) return url;
+    return TARGET_ORIGIN + '/' + url;
+  }
+
+  // Proxy an image URL through our asset endpoint
+  function proxyUrl(url) {
+    var resolved = resolveUrl(url);
+    if (!resolved) return null;
+    return ASSET_PROXY + encodeURIComponent(resolved);
+  }
+
+  // Rewrite a single image element's src to use the proxy
+  function proxyImage(img) {
+    if (img.dataset.nexoosProxied) return;
+    var src = img.getAttribute('src');
+    if (src && !src.includes('/api/asset') && !src.startsWith('data:')) {
+      var proxied = proxyUrl(src);
+      if (proxied) {
+        img.dataset.nexoosProxied = '1';
+        img.setAttribute('src', proxied);
+      }
+    }
+    // Also handle srcset
+    var srcset = img.getAttribute('srcset');
+    if (srcset && !srcset.includes('/api/asset')) {
+      img.setAttribute('srcset', srcset.replace(/(https?:\\/\\/[^\\s,]+|\\/(\\w[^\\s,]*))/g, function(url) {
+        if (url.includes('/api/asset')) return url;
+        var p = proxyUrl(url);
+        return p || url;
+      }));
+    }
+    // Handle data-src (lazy loading)
+    var dataSrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+    if (dataSrc && !dataSrc.includes('/api/asset') && !dataSrc.startsWith('data:')) {
+      var proxied = proxyUrl(dataSrc);
+      if (proxied) {
+        img.setAttribute('data-src', proxied);
+        if (img.getAttribute('data-lazy-src')) img.setAttribute('data-lazy-src', proxied);
+      }
+    }
+  }
+
+  // Rewrite background-image in inline styles
+  function proxyBackgroundImages(el) {
+    var style = el.getAttribute('style');
+    if (style && style.includes('url(') && !style.includes('/api/asset')) {
+      el.setAttribute('style', style.replace(/url\\(\\s*['"]?([^'")\\s]+)['"]?\\s*\\)/gi, function(match, url) {
+        if (url.startsWith('data:') || url.includes('/api/asset')) return match;
+        var p = proxyUrl(url);
+        return p ? 'url(' + p + ')' : match;
+      }));
+    }
+  }
+
+  // 1. CATCH-ALL ERROR HANDLER: If any image fails, retry through proxy
+  document.addEventListener('error', function(e) {
+    var el = e.target;
+    if (el.tagName === 'IMG' && !el.dataset.nexoosRetried) {
+      el.dataset.nexoosRetried = '1';
+      var src = el.getAttribute('src');
+      if (src && !src.includes('/api/asset')) {
+        var proxied = proxyUrl(src);
+        if (proxied) el.setAttribute('src', proxied);
+      }
+    }
+  }, true);
+
+  // 2. PROACTIVE: Rewrite all existing images on page load
+  function proxyAllImages() {
+    var imgs = document.querySelectorAll('img');
+    for (var i = 0; i < imgs.length; i++) proxyImage(imgs[i]);
+    // Also handle elements with background-image
+    var allEls = document.querySelectorAll('[style*="url"]');
+    for (var i = 0; i < allEls.length; i++) proxyBackgroundImages(allEls[i]);
+    // Handle <source> elements (picture, video, audio)
+    var sources = document.querySelectorAll('source[srcset], source[src]');
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i];
+      if (s.srcset && !s.srcset.includes('/api/asset')) {
+        s.srcset = s.srcset.replace(/(https?:\\/\\/[^\\s,]+|\\/(\\w[^\\s,]*))/g, function(url) {
+          var p = proxyUrl(url);
+          return p || url;
+        });
+      }
+    }
+  }
+  proxyAllImages();
+  if (document.readyState !== 'complete') {
+    window.addEventListener('load', proxyAllImages);
+  }
+
+  // 3. MUTATION OBSERVER: Catch dynamically added images
+  var observer = new MutationObserver(function(mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      var nodes = mutations[i].addedNodes;
+      for (var j = 0; j < nodes.length; j++) {
+        var node = nodes[j];
+        if (node.nodeType !== 1) continue;
+        if (node.tagName === 'IMG') proxyImage(node);
+        var imgs = node.querySelectorAll ? node.querySelectorAll('img') : [];
+        for (var k = 0; k < imgs.length; k++) proxyImage(imgs[k]);
+      }
+      // Handle src attribute changes
+      if (mutations[i].type === 'attributes' && mutations[i].attributeName === 'src') {
+        var target = mutations[i].target;
+        if (target.tagName === 'IMG' && !target.dataset.nexoosProxied) {
+          proxyImage(target);
+        }
+      }
+    }
+  });
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['src']
+  });
+
+  // ===== SCROLL & NAVIGATION =====
+  
   function sendScroll() {
     window.parent.postMessage({
       type: 'nexoos-scroll',
