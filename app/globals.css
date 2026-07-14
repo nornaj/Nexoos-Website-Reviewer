@@ -1968,6 +1968,11 @@ textarea.input-error:focus {
   right: 8px;
 }
 
+.folder-card:hover .card-delete {
+  opacity: 1;
+  transform: scale(1);
+}
+
 .folder-card-link {
   display: flex;
   flex-direction: column;
