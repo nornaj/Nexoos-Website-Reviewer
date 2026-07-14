@@ -79,8 +79,8 @@ function FolderCard({ folder, onDelete, onRename }) {
       ) : (
         <div
           className="folder-card-name"
-          onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); setEditing(true); }}
-          title="Double-click to rename"
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setEditing(true); }}
+          title="Click to rename"
         >
           {folder.name}
         </div>
