@@ -208,6 +208,14 @@ function proxyAssetUrls(html, targetOrigin) {
     }
   );
   
+  // Also catch relative URLs starting with / (not //) in src/poster
+  html = html.replace(
+    /((?:src|poster)\s*=\s*["'])\/((?!\/|api\/)[^"']*\.(png|jpg|jpeg|gif|webp|svg|ico|avif|mp4|webm))/gi,
+    (match, prefix, path) => {
+      return `${prefix}/api/asset?url=${encodeURIComponent(targetOrigin + '/' + path)}`;
+    }
+  );
+  
   // Rewrite srcset values
   html = html.replace(
     /srcset\s*=\s*"([^"]*)"/gi,
