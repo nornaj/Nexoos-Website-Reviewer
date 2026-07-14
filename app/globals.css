@@ -1940,16 +1940,16 @@ textarea.input-error:focus {
   flex-direction: column;
   align-items: center;
   padding: 20px 12px 16px;
-  background: oklch(0.15 0.005 90);
-  border: 1px solid oklch(0.22 0.005 90);
+  background: #fff;
+  border: 1px solid #e0e0e0;
   border-radius: 14px;
   transition: all 0.2s;
 }
 
 .folder-card:hover {
-  border-color: oklch(0.3 0.01 90);
+  border-color: #ccc;
   transform: translateY(-2px);
-  box-shadow: 0 8px 24px oklch(0 0 0 / 0.3);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.08);
 }
 
 .folder-card .card-delete {
@@ -1983,7 +1983,7 @@ textarea.input-error:focus {
 
 .folder-card-name {
   font: 600 13px 'Plus Jakarta Sans', sans-serif;
-  color: oklch(0.8 0.01 90);
+  color: #333;
   text-align: center;
   cursor: default;
   padding: 4px 8px;
@@ -1997,14 +1997,14 @@ textarea.input-error:focus {
 }
 
 .folder-card-name:hover {
-  border-color: oklch(0.3 0.01 90);
-  background: oklch(0.18 0.005 90);
+  border-color: #ddd;
+  background: #f5f5f5;
 }
 
 .folder-card-name-input {
   font: 600 13px 'Plus Jakarta Sans', sans-serif;
-  color: #fff;
-  background: oklch(0.12 0.005 90);
+  color: #333;
+  background: #fff;
   border: 1px solid oklch(0.58 0.15 40);
   border-radius: 6px;
   padding: 4px 8px;
@@ -2016,8 +2016,8 @@ textarea.input-error:focus {
 
 /* ========== ADD PAGE FORM ========== */
 .add-page-form {
-  background: oklch(0.15 0.005 90);
-  border: 1px solid oklch(0.25 0.005 90);
+  background: #fff;
+  border: 1px solid #e0e0e0;
   border-radius: 14px;
   padding: 24px;
   margin-bottom: 24px;
@@ -2028,13 +2028,27 @@ textarea.input-error:focus {
   margin-bottom: 16px;
 }
 
+.add-page-form label {
+  color: #555;
+}
+
+.add-page-form input {
+  background: #f9f9f9;
+  color: #333;
+  border-color: #ddd;
+}
+
+.add-page-form input:focus {
+  border-color: oklch(0.58 0.15 40);
+}
+
 .add-page-form textarea {
   width: 100%;
   padding: 10px 14px;
-  border: 1px solid oklch(0.3 0.005 90);
+  border: 1px solid #ddd;
   border-radius: 8px;
-  background: oklch(0.12 0.005 90);
-  color: #fff;
+  background: #f9f9f9;
+  color: #333;
   font: 400 14px 'Plus Jakarta Sans', sans-serif;
   resize: vertical;
   outline: none;
