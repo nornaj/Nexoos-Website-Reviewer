@@ -126,7 +126,7 @@ export default function WebsitePreview({
 }) {
   const [loading, setLoading] = useState(true);
   const [screenshotUrl, setScreenshotUrl] = useState(null);
-  const [failed, setFailed] = useState(false);
+  const [mode, setMode] = useState("loading"); // "loading" | "screenshot" | "iframe"
   const overlayRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const [dragging, setDragging] = useState(null);
@@ -134,25 +134,38 @@ export default function WebsitePreview({
   const hoverTimeout = useRef(null);
   const didDragRef = useRef(false);
 
-  // Fetch full-page screenshot on mount
+  // Try to fetch full-page screenshot; fall back to iframe if it fails
   useEffect(() => {
     if (!url) return;
     setLoading(true);
-    setFailed(false);
+    setMode("loading");
 
     const imgUrl = `/api/screenshot?url=${encodeURIComponent(url)}&fullPage=true`;
 
-    // Preload the image to check if it loads
+    // Use a timeout — if screenshot takes too long, fall back to iframe
+    const timeout = setTimeout(() => {
+      setScreenshotUrl(null);
+      setMode("iframe");
+      setLoading(false);
+    }, 45000);
+
     const img = new Image();
     img.onload = () => {
+      clearTimeout(timeout);
       setScreenshotUrl(imgUrl);
+      setMode("screenshot");
       setLoading(false);
     };
     img.onerror = () => {
-      setFailed(true);
+      clearTimeout(timeout);
+      // Fall back to iframe instead of showing error
+      setScreenshotUrl(null);
+      setMode("iframe");
       setLoading(false);
     };
     img.src = imgUrl;
+
+    return () => clearTimeout(timeout);
   }, [url]);
 
   // Scroll to annotation when clicking sidebar
@@ -162,16 +175,18 @@ export default function WebsitePreview({
     if (!annotation?.position) return;
 
     const container = scrollContainerRef.current;
-    const imgEl = container.querySelector(".preview-page-image");
-    if (!imgEl) return;
-
     const scaleF = zoom / 100;
-    const targetY = (annotation.position.y / 100) * imgEl.naturalHeight * scaleF;
-    container.scrollTo({
-      top: targetY - container.clientHeight / 3,
-      behavior: "smooth",
-    });
-  }, [activeCommentId, annotations, zoom]);
+
+    if (mode === "screenshot") {
+      const imgEl = container.querySelector(".preview-page-image");
+      if (!imgEl) return;
+      const targetY = (annotation.position.y / 100) * imgEl.naturalHeight * scaleF;
+      container.scrollTo({
+        top: targetY - container.clientHeight / 3,
+        behavior: "smooth",
+      });
+    }
+  }, [activeCommentId, annotations, zoom, mode]);
 
   const handlePinEnter = (id) => {
     if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
@@ -283,31 +298,79 @@ export default function WebsitePreview({
     );
   };
 
+  const renderAnnotations = () => (
+    <>
+      {annotations.map((a) => {
+        if (a.position?.width && a.position?.height) {
+          return (
+            <div
+              key={a.id}
+              className={`annotation-rect annotation-rect--${a.type}`}
+              style={{
+                left: `${a.position.x}%`,
+                top: `${a.position.y}%`,
+                width: `${a.position.width}%`,
+                height: `${a.position.height}%`,
+              }}
+              onMouseEnter={() => handlePinEnter(a.id)}
+              onMouseLeave={handlePinLeave}
+              onClick={(e) => {
+                e.stopPropagation();
+                onPinClick(a.id);
+              }}
+            >
+              {renderTooltip(a)}
+            </div>
+          );
+        }
+
+        return (
+          <div
+            key={a.id}
+            className={`annotation-pin annotation-pin--${a.type}${activeCommentId === a.id ? " active" : ""}`}
+            style={{
+              left: `${a.position?.x || 0}%`,
+              top: `${a.position?.y || 0}%`,
+            }}
+            onMouseEnter={() => handlePinEnter(a.id)}
+            onMouseLeave={handlePinLeave}
+            onClick={(e) => {
+              e.stopPropagation();
+              onPinClick(a.id);
+            }}
+          >
+            {getAnnotationNumber(a)}
+            {renderTooltip(a)}
+          </div>
+        );
+      })}
+
+      {dragging && (
+        <div
+          className={`annotation-rect annotation-rect--${activeTool}`}
+          style={{
+            left: `${Math.min(dragging.startX, dragging.currentX)}%`,
+            top: `${Math.min(dragging.startY, dragging.currentY)}%`,
+            width: `${Math.abs(dragging.currentX - dragging.startX)}%`,
+            height: `${Math.abs(dragging.currentY - dragging.startY)}%`,
+            opacity: 0.6,
+          }}
+        />
+      )}
+    </>
+  );
+
   return (
     <div className="preview-panel" ref={scrollContainerRef}>
       {loading && (
         <div className="preview-loading">
           <div className="preview-spinner" />
-          <span>Capturing full page screenshot…</span>
+          <span>Capturing page screenshot…</span>
         </div>
       )}
 
-      {failed ? (
-        <div className="preview-fallback">
-          <div className="preview-fallback-icon">🚫</div>
-          <div className="preview-fallback-text">
-            Failed to capture this website. It may be blocking screenshots.
-          </div>
-          <a
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn btn--small"
-          >
-            Open in new tab ↗
-          </a>
-        </div>
-      ) : screenshotUrl ? (
+      {/* Screenshot mode — full page image with overlay */}
+      {mode === "screenshot" && screenshotUrl && (
         <div
           className="preview-screenshot-wrap"
           style={{
@@ -316,15 +379,12 @@ export default function WebsitePreview({
             width: `${10000 / zoom}%`,
           }}
         >
-          {/* Full-page screenshot as the visual layer */}
           <img
             src={screenshotUrl}
             alt="Full page screenshot"
             className="preview-page-image"
             draggable={false}
           />
-
-          {/* Annotation overlay — matches the image size exactly */}
           <div
             ref={overlayRef}
             className={`preview-overlay${activeTool === "select" ? " mode-select" : ""}`}
@@ -333,68 +393,42 @@ export default function WebsitePreview({
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
           >
-            {/* Render annotations */}
-            {annotations.map((a) => {
-              if (a.position?.width && a.position?.height) {
-                return (
-                  <div
-                    key={a.id}
-                    className={`annotation-rect annotation-rect--${a.type}`}
-                    style={{
-                      left: `${a.position.x}%`,
-                      top: `${a.position.y}%`,
-                      width: `${a.position.width}%`,
-                      height: `${a.position.height}%`,
-                    }}
-                    onMouseEnter={() => handlePinEnter(a.id)}
-                    onMouseLeave={handlePinLeave}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onPinClick(a.id);
-                    }}
-                  >
-                    {renderTooltip(a)}
-                  </div>
-                );
-              }
-
-              return (
-                <div
-                  key={a.id}
-                  className={`annotation-pin annotation-pin--${a.type}${activeCommentId === a.id ? " active" : ""}`}
-                  style={{
-                    left: `${a.position?.x || 0}%`,
-                    top: `${a.position?.y || 0}%`,
-                  }}
-                  onMouseEnter={() => handlePinEnter(a.id)}
-                  onMouseLeave={handlePinLeave}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onPinClick(a.id);
-                  }}
-                >
-                  {getAnnotationNumber(a)}
-                  {renderTooltip(a)}
-                </div>
-              );
-            })}
-
-            {/* Drag preview rectangle */}
-            {dragging && (
-              <div
-                className={`annotation-rect annotation-rect--${activeTool}`}
-                style={{
-                  left: `${Math.min(dragging.startX, dragging.currentX)}%`,
-                  top: `${Math.min(dragging.startY, dragging.currentY)}%`,
-                  width: `${Math.abs(dragging.currentX - dragging.startX)}%`,
-                  height: `${Math.abs(dragging.currentY - dragging.startY)}%`,
-                  opacity: 0.6,
-                }}
-              />
-            )}
+            {renderAnnotations()}
           </div>
         </div>
-      ) : null}
+      )}
+
+      {/* Iframe fallback mode — live website with viewport-relative pins */}
+      {mode === "iframe" && (
+        <div
+          className="preview-iframe-wrap"
+          style={{
+            transform: `scale(${zoom / 100})`,
+            transformOrigin: "top left",
+            width: `${10000 / zoom}%`,
+            height: `${10000 / zoom}%`,
+          }}
+        >
+          <iframe
+            src={url}
+            className="preview-iframe"
+            title="Website preview"
+            sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
+            onLoad={() => setLoading(false)}
+            onError={() => setLoading(false)}
+          />
+          <div
+            ref={overlayRef}
+            className={`preview-overlay${activeTool === "select" ? " mode-select" : ""}`}
+            onClick={handleOverlayClick}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+          >
+            {renderAnnotations()}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
