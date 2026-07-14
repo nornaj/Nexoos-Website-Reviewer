@@ -1188,6 +1188,7 @@ textarea.input-error:focus {
   border-bottom: 1px solid oklch(0.96 0.004 90);
   transition: background 0.1s ease;
   cursor: pointer;
+  position: relative;
 }
 
 .comment-card:hover {
@@ -1200,6 +1201,22 @@ textarea.input-error:focus {
 
 .comment-card.resolved {
   opacity: 0.5;
+}
+
+.comment-pin-number {
+  position: absolute;
+  bottom: 8px;
+  right: 10px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: oklch(0.22 0.01 90);
+  color: #fff;
+  font: 700 11px 'Plus Jakarta Sans', sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 
 .comment-header {

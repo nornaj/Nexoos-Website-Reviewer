@@ -105,7 +105,10 @@ export default function CommentsSidebar({
             </p>
           </div>
         ) : (
-          filtered.map((comment) => (
+          filtered.map((comment) => {
+            // Compute the pin number from the full comments array (matching the preview overlay)
+            const pinNumber = comments.findIndex((c) => c.id === comment.id) + 1;
+            return (
             <div
               key={comment.id}
               className={`comment-card${activeCommentId === comment.id ? " active" : ""}${comment.resolved ? " resolved" : ""}`}
@@ -122,6 +125,10 @@ export default function CommentsSidebar({
               <div className={`comment-text${comment.resolved ? " resolved-text" : ""}`}>
                 {comment.text || `${getTypeIcon(comment.type)} ${comment.type === "highlight" ? "Marked as unwanted" : comment.type === "approve" ? "Approved section" : comment.type === "suggestion" ? "Edit suggestion" : "Comment"}`}
               </div>
+
+              {comment.position && (
+                <span className="comment-pin-number">{pinNumber}</span>
+              )}
 
               <div className="comment-actions">
                 <button
@@ -190,7 +197,7 @@ export default function CommentsSidebar({
                 </div>
               )}
             </div>
-          ))
+          );})
         )}
       </div>
 

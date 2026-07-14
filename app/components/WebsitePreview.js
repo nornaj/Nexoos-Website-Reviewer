@@ -134,9 +134,13 @@ export default function WebsitePreview({
     return () => window.removeEventListener("message", handleMessage);
   }, []);
 
-  // Scroll iframe to annotation when clicking sidebar
+  // Scroll iframe to annotation when clicking sidebar (only once per click)
+  const lastScrolledId = useRef(null);
   useEffect(() => {
     if (!activeCommentId || !iframeRef.current) return;
+    if (lastScrolledId.current === activeCommentId) return;
+    lastScrolledId.current = activeCommentId;
+
     const annotation = annotations.find((a) => a.id === activeCommentId);
     if (!annotation?.position?.pageY) return;
 
