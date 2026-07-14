@@ -114,18 +114,44 @@ async function quickFetch(url) {
   }
 }
 
-// Inject Nexoos scripts into the HTML
-function injectScripts(html, targetUrl) {
-  const urlFix = `<script data-nexoos="url-fix">history.replaceState(null,'','${targetUrl.pathname}${targetUrl.search || ''}');` +
-    `Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});</script>`;
+// Strip client-side framework JS from Puppeteer-rendered HTML
+// These scripts try to hydrate the page and fail on a different origin
+function stripFrameworkScripts(html) {
+  // Remove Next.js bootstrap/hydration scripts
+  html = html.replace(/<script[^>]*>self\.__next_f\.push[\s\S]*?<\/script>/gi, '');
+  html = html.replace(/<script[^>]*src="\/_next\/static[\s\S]*?<\/script>/gi, '');
+  html = html.replace(/<script[^>]*id="__NEXT_DATA__"[\s\S]*?<\/script>/gi, '');
+  
+  // Remove Nuxt hydration scripts
+  html = html.replace(/<script[^>]*>window\.__NUXT__[\s\S]*?<\/script>/gi, '');
+  
+  // Remove Remix hydration scripts
+  html = html.replace(/<script[^>]*>window\.__remixContext[\s\S]*?<\/script>/gi, '');
+  
+  return html;
+}
 
-  html = urlFix + html;
+// Inject Nexoos scripts into the HTML
+function injectScripts(html, targetUrl, wasBrowserRendered = false) {
+  // If this was rendered by Puppeteer (JS framework), strip hydration scripts
+  // to prevent "This page couldn't load" errors
+  if (wasBrowserRendered) {
+    html = stripFrameworkScripts(html);
+  }
 
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
-  if (/<head/i.test(html)) {
-    html = html.replace(/<head([^>]*)>/i, `<head$1><base href="${baseHref}">`);
+  
+  // The urlFix + base tag go INSIDE <head> to preserve <!DOCTYPE> (prevents quirks mode)
+  const headInjection = `<base href="${baseHref}">` +
+    `<script data-nexoos="url-fix">history.replaceState(null,'','${targetUrl.pathname}${targetUrl.search || ''}');` +
+    `Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});</script>`;
+
+  if (/<head([^>]*)>/i.test(html)) {
+    html = html.replace(/<head([^>]*)>/i, `<head$1>${headInjection}`);
+  } else if (/<html([^>]*)>/i.test(html)) {
+    html = html.replace(/<html([^>]*)>/i, `<html$1><head>${headInjection}</head>`);
   } else {
-    html = `<base href="${baseHref}">` + html;
+    html = `<head>${headInjection}</head>` + html;
   }
 
   const injectedScript = `
@@ -250,7 +276,7 @@ export async function GET(request) {
     }
 
     // Step 3: Inject scripts and return
-    html = injectScripts(html, targetUrl);
+    html = injectScripts(html, targetUrl, usedBrowser);
 
     return new NextResponse(html, {
       headers: {
