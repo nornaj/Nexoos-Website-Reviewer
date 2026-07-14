@@ -92,7 +92,7 @@ export async function GET(request) {
     }
 
     browser = await puppeteer.launch({
-      headless: isDev ? "new" : chromium.headless,
+      headless: isDev ? "shell" : "shell",
       executablePath,
       args,
       defaultViewport: { width: 1280, height: 800 },

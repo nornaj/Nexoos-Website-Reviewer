@@ -3,7 +3,7 @@ import puppeteer from "puppeteer-core";
 import { NextResponse } from "next/server";
 import fs from "fs";
 
-// Vercel serverless config — Puppeteer needs more time
+// Vercel serverless config
 export const maxDuration = 60;
 
 // Find a locally installed Chrome for development
@@ -24,41 +24,41 @@ function getLocalChromePath() {
   return null;
 }
 
-// Try fetching with a headless browser (bypasses WAF/Cloudflare)
+// Fetch page HTML using a real headless browser (bypasses WAF/Cloudflare)
 async function fetchWithBrowser(url) {
   const isDev = process.env.NODE_ENV === "development";
-  let executablePath;
-  let args;
+  let browser;
 
   if (isDev) {
-    executablePath = getLocalChromePath();
+    const executablePath = getLocalChromePath();
     if (!executablePath) throw new Error("No local Chrome found");
-    args = [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-    ];
+    browser = await puppeteer.launch({
+      headless: "shell",
+      executablePath,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+      ],
+      defaultViewport: { width: 1280, height: 900 },
+    });
   } else {
-    executablePath = await chromium.executablePath();
-    args = chromium.args;
+    // @sparticuz/chromium v149+ API: headless is baked into args,
+    // use "shell" mode, pass args directly
+    browser = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: { width: 1280, height: 900 },
+      executablePath: await chromium.executablePath(),
+      headless: "shell",
+    });
   }
-
-  const browser = await puppeteer.launch({
-    headless: isDev ? "new" : chromium.headless,
-    executablePath,
-    args,
-    defaultViewport: { width: 1280, height: 900 },
-  });
 
   try {
     const page = await browser.newPage();
-    // Use domcontentloaded for speed — networkidle2 can take 10+ seconds
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-
-    // Brief wait for any JS rendering, but keep it short
+    // Brief wait for JS rendering
     await new Promise((r) => setTimeout(r, 300));
-
     const html = await page.content();
     await browser.close();
     return html;
@@ -68,10 +68,10 @@ async function fetchWithBrowser(url) {
   }
 }
 
-// Quick fetch with a tight timeout — we just want to see if a simple GET works
+// Quick fetch with a tight timeout
 async function quickFetch(url) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 4000); // 4s max
+  const timeout = setTimeout(() => controller.abort(), 4000);
 
   try {
     const res = await fetch(url, {
@@ -85,10 +85,9 @@ async function quickFetch(url) {
       signal: controller.signal,
     });
     clearTimeout(timeout);
-
     const html = await res.text();
     return { ok: res.ok, status: res.status, html };
-  } catch (error) {
+  } catch {
     clearTimeout(timeout);
     return { ok: false, status: 0, html: "" };
   }
@@ -96,13 +95,11 @@ async function quickFetch(url) {
 
 // Inject Nexoos scripts into the HTML
 function injectScripts(html, targetUrl) {
-  // Inject URL override at the VERY START of the document
   const urlFix = `<script data-nexoos="url-fix">history.replaceState(null,'','${targetUrl.pathname}${targetUrl.search || ''}');` +
     `Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});</script>`;
 
   html = urlFix + html;
 
-  // Insert <base> tag so all relative URLs resolve correctly
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
   if (/<head/i.test(html)) {
     html = html.replace(/<head([^>]*)>/i, `<head$1><base href="${baseHref}">`);
@@ -110,11 +107,9 @@ function injectScripts(html, targetUrl) {
     html = `<base href="${baseHref}">` + html;
   }
 
-  // Inject scroll-tracking script + link interception
   const injectedScript = `
 <script data-nexoos="true">
 (function() {
-  // Send scroll position to parent
   function sendScroll() {
     window.parent.postMessage({
       type: 'nexoos-scroll',
@@ -128,7 +123,6 @@ function injectScripts(html, targetUrl) {
   window.addEventListener('scroll', sendScroll, { passive: true });
   window.addEventListener('resize', sendScroll);
   
-  // Send initial scroll after load
   if (document.readyState === 'complete') {
     sendScroll();
   } else {
@@ -140,13 +134,11 @@ function injectScripts(html, targetUrl) {
   }
   sendScroll();
 
-  // Intercept link clicks — prevent navigation inside the review iframe
   document.addEventListener('click', function(e) {
     var link = e.target.closest('a[href]');
     if (link) {
       e.preventDefault();
       e.stopPropagation();
-      // Optionally open in new tab
       var href = link.getAttribute('href');
       if (href && href !== '#' && !href.startsWith('javascript:')) {
         window.parent.postMessage({ type: 'nexoos-link', href: link.href }, '*');
@@ -154,7 +146,6 @@ function injectScripts(html, targetUrl) {
     }
   }, true);
 
-  // Listen for scroll-to commands from parent
   window.addEventListener('message', function(e) {
     if (e.data && e.data.type === 'nexoos-scrollTo') {
       window.scrollTo({ top: e.data.top, behavior: 'smooth' });
@@ -183,22 +174,21 @@ export async function GET(request) {
   try {
     const targetUrl = new URL(url);
 
-    // Step 1: Quick fetch with 4s timeout — works for most normal sites
+    // Step 1: Quick fetch (4s timeout) — works for most normal sites
     const result = await quickFetch(url);
 
     let html;
 
     if (result.ok && result.html && result.html.trim().length > 0) {
-      // Simple fetch worked — fast path
+      // Fast path — simple fetch succeeded
       html = result.html;
     } else {
-      // Step 2: Simple fetch failed (non-2xx, empty, or timed out)
-      // Use Puppeteer headless browser to bypass WAF/Cloudflare/auth walls
-      console.log(`[proxy] Quick fetch failed for ${url} (HTTP ${result.status}, body: ${result.html?.length || 0} bytes), using Puppeteer`);
+      // Step 2: Fetch failed — use Puppeteer headless browser
+      console.log(`[proxy] Quick fetch failed for ${url} (HTTP ${result.status}), using Puppeteer`);
       html = await fetchWithBrowser(url);
     }
 
-    // Step 3: Inject our scripts and return
+    // Step 3: Inject scripts and return
     html = injectScripts(html, targetUrl);
 
     return new NextResponse(html, {
