@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 
 function formatExactDate(timestamp) {
   const d = new Date(timestamp);
@@ -126,7 +126,7 @@ export default function WebsitePreview({
 }) {
   const [loading, setLoading] = useState(true);
   const [screenshotUrl, setScreenshotUrl] = useState(null);
-  const [mode, setMode] = useState("loading"); // "loading" | "screenshot" | "iframe"
+  const [mode, setMode] = useState("loading");
   const overlayRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const [dragging, setDragging] = useState(null);
@@ -134,42 +134,69 @@ export default function WebsitePreview({
   const hoverTimeout = useRef(null);
   const didDragRef = useRef(false);
 
-  // Use refs for values needed in event handlers to avoid stale closures
+  // Refs for event handlers to avoid stale closures
   const activeToolRef = useRef(activeTool);
   const onAnnotationAddRef = useRef(onAnnotationAdd);
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { onAnnotationAddRef.current = onAnnotationAdd; }, [onAnnotationAdd]);
 
-  // Try to fetch full-page screenshot; fall back to iframe if it fails
+  // Screenshot loading with multiple fallback sources
   useEffect(() => {
     if (!url) return;
     setLoading(true);
     setMode("loading");
 
-    const imgUrl = `/api/screenshot?url=${encodeURIComponent(url)}&fullPage=true`;
+    // Source 1: Our own API (uses local Chrome in dev, @sparticuz/chromium on Vercel)
+    const ownApi = `/api/screenshot?url=${encodeURIComponent(url)}&fullPage=true`;
+    // Source 2: thum.io (free external screenshot service, no API key needed)
+    const thumIo = `https://image.thum.io/get/fullpage/width/1280/${url}`;
 
-    const timeout = setTimeout(() => {
-      setScreenshotUrl(null);
-      setMode("iframe");
-      setLoading(false);
-    }, 45000);
+    let cancelled = false;
 
-    const img = new Image();
-    img.onload = () => {
-      clearTimeout(timeout);
-      setScreenshotUrl(imgUrl);
-      setMode("screenshot");
-      setLoading(false);
-    };
-    img.onerror = () => {
-      clearTimeout(timeout);
-      setScreenshotUrl(null);
-      setMode("iframe");
-      setLoading(false);
-    };
-    img.src = imgUrl;
+    function tryLoadImage(src) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(src);
+        img.onerror = () => reject();
+        img.src = src;
 
-    return () => clearTimeout(timeout);
+        // Timeout after 30s per source
+        setTimeout(() => reject(), 30000);
+      });
+    }
+
+    async function loadScreenshot() {
+      // Try our own API first
+      try {
+        const result = await tryLoadImage(ownApi);
+        if (!cancelled) {
+          setScreenshotUrl(result);
+          setMode("screenshot");
+          setLoading(false);
+        }
+        return;
+      } catch {}
+
+      // Try external service
+      try {
+        const result = await tryLoadImage(thumIo);
+        if (!cancelled) {
+          setScreenshotUrl(result);
+          setMode("screenshot");
+          setLoading(false);
+        }
+        return;
+      } catch {}
+
+      // All failed — fall back to iframe
+      if (!cancelled) {
+        setMode("iframe");
+        setLoading(false);
+      }
+    }
+
+    loadScreenshot();
+    return () => { cancelled = true; };
   }, [url]);
 
   // Scroll to annotation when clicking sidebar
@@ -209,7 +236,7 @@ export default function WebsitePreview({
     hoverTimeout.current = setTimeout(() => setHoveredPin(null), 150);
   };
 
-  // Use plain functions (not useCallback) to always read fresh state via refs
+  // Plain functions using refs — always fresh, no stale closures
   const handleOverlayClick = (e) => {
     const tool = activeToolRef.current;
     if (tool === "select") return;
