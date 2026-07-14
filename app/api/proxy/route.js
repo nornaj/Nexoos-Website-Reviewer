@@ -193,8 +193,9 @@ function stripFrameworkScripts(html) {
 }
 
 // Rewrite image/media URLs from the target domain to use our asset proxy
-function proxyAssetUrls(html, targetOrigin) {
+function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
   const hostname = new URL(targetOrigin).hostname;
+  const assetBase = `${proxyOrigin}/api/asset?url=`;
   
   // Rewrite img src, source srcset, video/audio src, poster
   // Match absolute URLs from the target domain in src/poster attributes
@@ -202,7 +203,7 @@ function proxyAssetUrls(html, targetOrigin) {
     /((?:src|poster)\s*=\s*["'])(https?:\/\/[^"']*)/gi,
     (match, prefix, url) => {
       if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif|mp4|webm|mp3|woff2?|ttf|eot)/i.test(url)) {
-        return `${prefix}/api/asset?url=${encodeURIComponent(url)}`;
+        return `${prefix}${assetBase}${encodeURIComponent(url)}`;
       }
       return match;
     }
@@ -212,7 +213,7 @@ function proxyAssetUrls(html, targetOrigin) {
   html = html.replace(
     /((?:src|poster)\s*=\s*["'])\/((?!\/|api\/)[^"']*\.(png|jpg|jpeg|gif|webp|svg|ico|avif|mp4|webm))/gi,
     (match, prefix, path) => {
-      return `${prefix}/api/asset?url=${encodeURIComponent(targetOrigin + '/' + path)}`;
+      return `${prefix}${assetBase}${encodeURIComponent(targetOrigin + '/' + path)}`;
     }
   );
   
@@ -224,7 +225,7 @@ function proxyAssetUrls(html, targetOrigin) {
         /(https?:\/\/[^\s,]+)/g,
         (url) => {
           if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif)/i.test(url)) {
-            return `/api/asset?url=${encodeURIComponent(url)}`;
+            return `${assetBase}${encodeURIComponent(url)}`;
           }
           return url;
         }
@@ -238,7 +239,7 @@ function proxyAssetUrls(html, targetOrigin) {
     /url\(\s*['"]?(https?:\/\/[^'")\s]+)['"]?\s*\)/gi,
     (match, url) => {
       if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif)/i.test(url)) {
-        return `url(/api/asset?url=${encodeURIComponent(url)})`;
+        return `url(${assetBase}${encodeURIComponent(url)})`;
       }
       return match;
     }
@@ -248,22 +249,19 @@ function proxyAssetUrls(html, targetOrigin) {
 }
 
 // Inject Nexoos scripts into the HTML
-function injectScripts(html, targetUrl, wasBrowserRendered = false) {
+function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin = '') {
   if (wasBrowserRendered) {
     html = stripFrameworkScripts(html);
   }
   
-  // Proxy image/media URLs through our asset endpoint
-  html = proxyAssetUrls(html, targetUrl.origin);
-
+  // Proxy image/media URLs through our asset endpoint (server-side)
+  html = proxyAssetUrls(html, targetUrl.origin, proxyOrigin);
+  
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
 
   // Everything goes INSIDE <head> to preserve <!DOCTYPE> (prevents quirks mode)
-  // Use unsafe-url referrer so images load with a referer header (prevents hotlink blocking)
   const headInjection = `<base href="${baseHref}">` +
-    `<meta name="referrer" content="unsafe-url">` +
-    `<script data-nexoos="url-fix">history.replaceState(null,'','${targetUrl.pathname}${targetUrl.search || ''}');` +
-    `Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});</script>`;
+    `<script data-nexoos="url-fix">try{Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});}catch(e){}</script>`;
 
   if (/<head([^>]*)>/i.test(html)) {
     html = html.replace(/<head([^>]*)>/i, `<head$1>${headInjection}`);
@@ -279,7 +277,8 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false) {
 <script data-nexoos="true">
 (function() {
   var TARGET_ORIGIN = '${targetOrigin}';
-  var ASSET_PROXY = '/api/asset?url=';
+  var PROXY_ORIGIN = window.location.origin;
+  var ASSET_PROXY = PROXY_ORIGIN + '/api/asset?url=';
 
   // ===== IMAGE PROXY: Permanent catch-all solution =====
   
@@ -521,8 +520,12 @@ export async function GET(request) {
       }
     }
 
+    // Extract proxy origin from request URL
+    const reqUrl = new URL(request.url);
+    const proxyOrigin = reqUrl.origin;
+
     // Inject Nexoos scripts
-    html = injectScripts(html, targetUrl, usedBrowser);
+    html = injectScripts(html, targetUrl, usedBrowser, proxyOrigin);
 
     return new NextResponse(html, {
       headers: {

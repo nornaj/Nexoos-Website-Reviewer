@@ -32,6 +32,7 @@ export async function GET(request) {
         "Content-Type": contentType,
         "Cache-Control": "public, max-age=86400",
         "Access-Control-Allow-Origin": "*",
+        "Cross-Origin-Resource-Policy": "cross-origin",
       },
     });
   } catch {
