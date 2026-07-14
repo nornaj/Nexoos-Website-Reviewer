@@ -6,6 +6,7 @@ export default function EmptyState({
   description = "",
   ctaText = "",
   ctaHref = "",
+  onCtaClick = null,
 }) {
   return (
     <div className="empty-state">
@@ -16,6 +17,11 @@ export default function EmptyState({
         <Link href={ctaHref} className="btn" style={{ marginTop: "8px" }}>
           {ctaText}
         </Link>
+      )}
+      {ctaText && onCtaClick && !ctaHref && (
+        <button className="btn" style={{ marginTop: "8px" }} onClick={onCtaClick}>
+          {ctaText}
+        </button>
       )}
     </div>
   );

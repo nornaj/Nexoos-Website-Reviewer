@@ -1,6 +1,6 @@
 "use client";
 
-import { ProjectsProvider, UserProvider } from "@/lib/context";
+import { ProjectsProvider, FoldersProvider, UserProvider } from "@/lib/context";
 import { ToastProvider } from "./components/Toast";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import Navbar from "./components/Navbar";
@@ -38,12 +38,14 @@ export default function Providers({ children }) {
     <AuthProvider>
       <AuthGuard>
         <UserProvider>
-          <ProjectsProvider>
-            <ToastProvider>
-              <Navbar />
-              {children}
-            </ToastProvider>
-          </ProjectsProvider>
+          <FoldersProvider>
+            <ProjectsProvider>
+              <ToastProvider>
+                <Navbar />
+                {children}
+              </ToastProvider>
+            </ProjectsProvider>
+          </FoldersProvider>
         </UserProvider>
       </AuthGuard>
     </AuthProvider>

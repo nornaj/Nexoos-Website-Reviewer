@@ -1,34 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
-import { useProjects } from "@/lib/context";
-import { formatDate } from "@/lib/store";
+import { useState, useRef, useEffect } from "react";
+import { useFolders } from "@/lib/context";
 import { useToast } from "./components/Toast";
 import Modal from "./components/Modal";
 import EmptyState from "./components/EmptyState";
-
-function getBadgeClass(status) {
-  switch (status) {
-    case "Approved":
-      return "badge badge--approved";
-    case "Pending":
-      return "badge badge--pending";
-    case "Changes needed":
-      return "badge badge--changes";
-    default:
-      return "badge";
-  }
-}
-
-function getDomain(url) {
-  try {
-    const cleanUrl = url.startsWith("http") ? url : `https://${url}`;
-    return new URL(cleanUrl).hostname.replace("www.", "");
-  } catch {
-    return url;
-  }
-}
 
 const AVATAR_COLORS = [
   ["#d4562a", "#e8734d"],
@@ -45,23 +22,102 @@ function getAvatarColor(name) {
   return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
 }
 
-export default function HomePage() {
-  const { projects, loaded, deleteProject } = useProjects();
-  const { addToast } = useToast();
-  const [deleteModal, setDeleteModal] = useState({ open: false, project: null });
+function FolderCard({ folder, onDelete, onRename }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(folder.name);
+  const inputRef = useRef(null);
 
-  const handleDelete = (e, project) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDeleteModal({ open: true, project });
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const handleRename = () => {
+    const trimmed = name.trim();
+    if (trimmed && trimmed !== folder.name) {
+      onRename(folder.id, trimmed);
+    } else {
+      setName(folder.name);
+    }
+    setEditing(false);
+  };
+
+  const colors = getAvatarColor(folder.name);
+
+  return (
+    <div className="folder-card">
+      <button
+        className="card-delete"
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(folder); }}
+        title="Delete folder"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="3 6 5 6 21 6" />
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        </svg>
+      </button>
+
+      <Link href={`/folder/${folder.id}`} className="folder-card-link">
+        <div
+          className="folder-card-avatar"
+          style={{ background: `linear-gradient(135deg, ${colors[0]}, ${colors[1]})` }}
+        >
+          <span className="folder-card-letter">{folder.name.charAt(0).toUpperCase()}</span>
+        </div>
+      </Link>
+
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="folder-card-name-input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onBlur={handleRename}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleRename();
+            if (e.key === "Escape") { setName(folder.name); setEditing(false); }
+          }}
+        />
+      ) : (
+        <div
+          className="folder-card-name"
+          onDoubleClick={() => setEditing(true)}
+          title="Double-click to rename"
+        >
+          {folder.name}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function HomePage() {
+  const { folders, loaded, addFolder, renameFolder, deleteFolder } = useFolders();
+  const { addToast } = useToast();
+  const [deleteModal, setDeleteModal] = useState({ open: false, folder: null });
+
+  const handleCreate = async () => {
+    const folder = await addFolder("New Project");
+    if (folder) addToast("Project folder created", "success");
+  };
+
+  const handleDelete = (folder) => {
+    setDeleteModal({ open: true, folder });
   };
 
   const confirmDelete = async () => {
-    if (deleteModal.project) {
-      await deleteProject(deleteModal.project.id);
-      addToast(`"${deleteModal.project.name}" deleted`, "success");
+    if (deleteModal.folder) {
+      await deleteFolder(deleteModal.folder.id);
+      addToast(`"${deleteModal.folder.name}" deleted`, "success");
     }
-    setDeleteModal({ open: false, project: null });
+    setDeleteModal({ open: false, folder: null });
+  };
+
+  const handleRename = async (id, name) => {
+    await renameFolder(id, name);
+    addToast("Folder renamed", "success");
   };
 
   if (!loaded) {
@@ -70,18 +126,14 @@ export default function HomePage() {
         <div className="top">
           <div>
             <div className="eyebrow">Nexoos</div>
-            <h1>Recent Projects</h1>
+            <h1>Projects</h1>
           </div>
         </div>
-        <div className="grid">
+        <div className="folder-grid">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="card">
-              <div className="card-thumb skeleton" style={{ height: 120 }} />
-              <div className="card-body">
-                <div className="skeleton" style={{ height: 20, width: "60%", marginBottom: 8 }} />
-                <div className="skeleton" style={{ height: 14, width: "40%", marginBottom: 10 }} />
-                <div className="skeleton" style={{ height: 12, width: "80%" }} />
-              </div>
+            <div key={i} className="folder-card">
+              <div className="folder-card-avatar skeleton" />
+              <div className="skeleton" style={{ height: 16, width: "60%", marginTop: 10 }} />
             </div>
           ))}
         </div>
@@ -94,88 +146,40 @@ export default function HomePage() {
       <div className="top">
         <div>
           <div className="eyebrow">Nexoos</div>
-          <h1>Recent Projects</h1>
+          <h1>Projects</h1>
         </div>
-        <Link href="/review-form" className="btn">
+        <button className="btn" onClick={handleCreate}>
           <span className="btn-icon">+</span> Review a Project
-        </Link>
+        </button>
       </div>
 
-      {projects.length === 0 ? (
+      {folders.length === 0 ? (
         <EmptyState
-          icon="📋"
+          icon="📁"
           title="No projects yet"
-          description="Create your first review to start collaborating on website copy."
+          description="Create your first project folder to start reviewing websites."
           ctaText="+ Review a Project"
-          ctaHref="/review-form"
+          onCtaClick={handleCreate}
         />
       ) : (
-        <div className="grid">
-          {projects.map((project) => (
-            <Link
-              key={project.id}
-              href={`/project/${project.id}`}
-              className="card"
-            >
-              <button
-                className="card-delete"
-                onClick={(e) => handleDelete(e, project)}
-                title="Delete project"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="3 6 5 6 21 6" />
-                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                </svg>
-              </button>
-              <div className="card-thumb">
-                {project.url ? (
-                  <img
-                    src={`/api/screenshot?url=${encodeURIComponent(project.url)}`}
-                    alt={`${project.name} screenshot`}
-                    onError={(e) => {
-                      e.target.style.display = "none";
-                      e.target.nextSibling.style.display = "flex";
-                    }}
-                  />
-                ) : null}
-                <div
-                  className="card-thumb-fallback"
-                  style={{
-                    display: project.url ? "none" : "flex",
-                    background: `linear-gradient(135deg, ${getAvatarColor(project.name)[0]}, ${getAvatarColor(project.name)[1]})`,
-                  }}
-                >
-                  <span className="card-thumb-letter">{project.name.charAt(0).toUpperCase()}</span>
-                </div>
-              </div>
-              <div className="card-body">
-                <div className="card-row">
-                  <div className="card-name">{project.name}</div>
-                  <span className={getBadgeClass(project.status)}>
-                    {project.status}
-                  </span>
-                </div>
-                <div className="card-url">
-                  {project.url
-                    ? project.url.replace(/^https?:\/\//, "")
-                    : "No URL"}
-                </div>
-                <div className="card-meta">
-                  <span>{project.reviewerName || "Unassigned"}</span>
-                  <span>{formatDate(project.createdAt)}</span>
-                </div>
-              </div>
-            </Link>
+        <div className="folder-grid">
+          {folders.map((folder) => (
+            <FolderCard
+              key={folder.id}
+              folder={folder}
+              onDelete={handleDelete}
+              onRename={handleRename}
+            />
           ))}
         </div>
       )}
 
       <Modal
         isOpen={deleteModal.open}
-        onClose={() => setDeleteModal({ open: false, project: null })}
+        onClose={() => setDeleteModal({ open: false, folder: null })}
         onConfirm={confirmDelete}
         title="Delete project?"
-        message={`Are you sure you want to delete "${deleteModal.project?.name}"? This action cannot be undone.`}
+        message={`Are you sure you want to delete "${deleteModal.folder?.name}"? All pages inside will be deleted too.`}
         confirmText="Delete"
         danger
       />
