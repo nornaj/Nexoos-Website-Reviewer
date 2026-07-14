@@ -134,6 +134,12 @@ export default function WebsitePreview({
   const hoverTimeout = useRef(null);
   const didDragRef = useRef(false);
 
+  // Use refs for values needed in event handlers to avoid stale closures
+  const activeToolRef = useRef(activeTool);
+  const onAnnotationAddRef = useRef(onAnnotationAdd);
+  useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
+  useEffect(() => { onAnnotationAddRef.current = onAnnotationAdd; }, [onAnnotationAdd]);
+
   // Try to fetch full-page screenshot; fall back to iframe if it fails
   useEffect(() => {
     if (!url) return;
@@ -142,7 +148,6 @@ export default function WebsitePreview({
 
     const imgUrl = `/api/screenshot?url=${encodeURIComponent(url)}&fullPage=true`;
 
-    // Use a timeout — if screenshot takes too long, fall back to iframe
     const timeout = setTimeout(() => {
       setScreenshotUrl(null);
       setMode("iframe");
@@ -158,7 +163,6 @@ export default function WebsitePreview({
     };
     img.onerror = () => {
       clearTimeout(timeout);
-      // Fall back to iframe instead of showing error
       setScreenshotUrl(null);
       setMode("iframe");
       setLoading(false);
@@ -205,56 +209,50 @@ export default function WebsitePreview({
     hoverTimeout.current = setTimeout(() => setHoveredPin(null), 150);
   };
 
-  const handleOverlayClick = useCallback(
-    (e) => {
-      if (activeTool === "select") return;
-      if (didDragRef.current) {
-        didDragRef.current = false;
-        return;
-      }
-
-      const rect = overlayRef.current.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 100;
-      const y = ((e.clientY - rect.top) / rect.height) * 100;
-
-      onAnnotationAdd({
-        type: activeTool,
-        position: { x, y },
-        clientX: e.clientX,
-        clientY: e.clientY,
-      });
-    },
-    [activeTool, onAnnotationAdd]
-  );
-
-  const handleMouseDown = useCallback(
-    (e) => {
-      if (activeTool !== "highlight" && activeTool !== "approve") return;
+  // Use plain functions (not useCallback) to always read fresh state via refs
+  const handleOverlayClick = (e) => {
+    const tool = activeToolRef.current;
+    if (tool === "select") return;
+    if (didDragRef.current) {
       didDragRef.current = false;
+      return;
+    }
 
-      const rect = overlayRef.current.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 100;
-      const y = ((e.clientY - rect.top) / rect.height) * 100;
+    const rect = overlayRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
 
-      setDragging({ startX: x, startY: y, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY });
-    },
-    [activeTool]
-  );
+    onAnnotationAddRef.current({
+      type: tool,
+      position: { x, y },
+      clientX: e.clientX,
+      clientY: e.clientY,
+    });
+  };
 
-  const handleMouseMove = useCallback(
-    (e) => {
-      if (!dragging) return;
+  const handleMouseDown = (e) => {
+    const tool = activeToolRef.current;
+    if (tool !== "highlight" && tool !== "approve") return;
+    didDragRef.current = false;
 
-      const rect = overlayRef.current.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 100;
-      const y = ((e.clientY - rect.top) / rect.height) * 100;
+    const rect = overlayRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
 
-      setDragging((prev) => ({ ...prev, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY }));
-    },
-    [dragging]
-  );
+    setDragging({ startX: x, startY: y, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY });
+  };
 
-  const handleMouseUp = useCallback(() => {
+  const handleMouseMove = (e) => {
+    if (!dragging) return;
+
+    const rect = overlayRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+    setDragging((prev) => ({ ...prev, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY }));
+  };
+
+  const handleMouseUp = () => {
     if (!dragging) return;
 
     const width = Math.abs(dragging.currentX - dragging.startX);
@@ -262,8 +260,8 @@ export default function WebsitePreview({
 
     if (width > 1 && height > 1) {
       didDragRef.current = true;
-      onAnnotationAdd({
-        type: activeTool,
+      onAnnotationAddRef.current({
+        type: activeToolRef.current,
         position: {
           x: Math.min(dragging.startX, dragging.currentX),
           y: Math.min(dragging.startY, dragging.currentY),
@@ -276,7 +274,7 @@ export default function WebsitePreview({
     }
 
     setDragging(null);
-  }, [dragging, activeTool, onAnnotationAdd]);
+  };
 
   const getAnnotationNumber = (annotation) => {
     const idx = annotations.findIndex((a) => a.id === annotation.id);
@@ -298,8 +296,15 @@ export default function WebsitePreview({
     );
   };
 
-  const renderAnnotations = () => (
-    <>
+  const renderOverlay = () => (
+    <div
+      ref={overlayRef}
+      className={`preview-overlay${activeTool === "select" ? " mode-select" : ""}`}
+      onClick={handleOverlayClick}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+    >
       {annotations.map((a) => {
         if (a.position?.width && a.position?.height) {
           return (
@@ -357,7 +362,7 @@ export default function WebsitePreview({
           }}
         />
       )}
-    </>
+    </div>
   );
 
   return (
@@ -369,7 +374,6 @@ export default function WebsitePreview({
         </div>
       )}
 
-      {/* Screenshot mode — full page image with overlay */}
       {mode === "screenshot" && screenshotUrl && (
         <div
           className="preview-screenshot-wrap"
@@ -385,20 +389,10 @@ export default function WebsitePreview({
             className="preview-page-image"
             draggable={false}
           />
-          <div
-            ref={overlayRef}
-            className={`preview-overlay${activeTool === "select" ? " mode-select" : ""}`}
-            onClick={handleOverlayClick}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-          >
-            {renderAnnotations()}
-          </div>
+          {renderOverlay()}
         </div>
       )}
 
-      {/* Iframe fallback mode — live website with viewport-relative pins */}
       {mode === "iframe" && (
         <div
           className="preview-iframe-wrap"
@@ -417,16 +411,7 @@ export default function WebsitePreview({
             onLoad={() => setLoading(false)}
             onError={() => setLoading(false)}
           />
-          <div
-            ref={overlayRef}
-            className={`preview-overlay${activeTool === "select" ? " mode-select" : ""}`}
-            onClick={handleOverlayClick}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-          >
-            {renderAnnotations()}
-          </div>
+          {renderOverlay()}
         </div>
       )}
     </div>
