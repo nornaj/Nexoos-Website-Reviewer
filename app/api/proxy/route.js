@@ -44,8 +44,6 @@ async function fetchWithBrowser(url) {
       defaultViewport: { width: 1280, height: 900 },
     });
   } else {
-    // @sparticuz/chromium v149+ API: headless is baked into args,
-    // use "shell" mode, pass args directly
     browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: { width: 1280, height: 900 },
@@ -56,19 +54,13 @@ async function fetchWithBrowser(url) {
 
   try {
     const page = await browser.newPage();
-    // Use networkidle0 to ensure all resources (CSS, JS) are loaded
     await page.goto(url, { waitUntil: "networkidle0", timeout: 20000 });
-    
-    // Wait for stylesheets to be applied and JS to render
     await new Promise((r) => setTimeout(r, 1000));
-    
-    // For JS-rendered sites, wait for the body to have real content
+
+    // Wait for body to have real content
     await page.evaluate(() => {
       return new Promise((resolve) => {
-        if (document.body && document.body.innerText.length > 100) {
-          return resolve();
-        }
-        // Wait up to 3 more seconds for content to appear
+        if (document.body && document.body.innerText.length > 100) return resolve();
         let checks = 0;
         const interval = setInterval(() => {
           checks++;
@@ -79,7 +71,7 @@ async function fetchWithBrowser(url) {
         }, 500);
       });
     });
-    
+
     const html = await page.content();
     await browser.close();
     return html;
@@ -114,35 +106,104 @@ async function quickFetch(url) {
   }
 }
 
+// Fetch a single CSS file and return its content
+async function fetchCSS(cssUrl) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(cssUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/css,*/*;q=0.1",
+        "Referer": new URL(cssUrl).origin + "/",
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      return await res.text();
+    }
+  } catch {}
+  return null;
+}
+
+// Inline external CSS into the HTML to avoid cross-origin referer issues
+async function inlineExternalCSS(html, targetOrigin) {
+  // Find all <link rel="stylesheet" href="..."> tags
+  const linkRegex = /<link([^>]*rel=["']stylesheet["'][^>]*)>/gi;
+  const matches = [];
+  let match;
+  
+  while ((match = linkRegex.exec(html)) !== null) {
+    const tag = match[0];
+    const hrefMatch = tag.match(/href=["']([^"']+)["']/i);
+    if (hrefMatch) {
+      let cssUrl = hrefMatch[1];
+      // Resolve relative URLs
+      if (cssUrl.startsWith("/") && !cssUrl.startsWith("//")) {
+        cssUrl = targetOrigin + cssUrl;
+      } else if (cssUrl.startsWith("//")) {
+        cssUrl = "https:" + cssUrl;
+      }
+      // Only inline CSS from the same domain (skip Google Fonts, CDNs — those load fine cross-origin)
+      if (cssUrl.includes(new URL(targetOrigin).hostname)) {
+        matches.push({ tag, url: cssUrl });
+      }
+    }
+  }
+
+  // Fetch ALL CSS files in parallel
+  const cssPromises = matches.map(async (m) => {
+    const css = await fetchCSS(m.url);
+    return { ...m, css };
+  });
+  
+  const results = await Promise.all(cssPromises);
+  
+  // Replace <link> tags with inline <style> tags
+  for (const r of results) {
+    if (r.css) {
+      // Fix relative url() references in CSS to be absolute
+      let fixedCSS = r.css.replace(
+        /url\(\s*['"]?(?!data:|http|\/\/)(\/[^'")]+)['"]?\s*\)/gi,
+        `url(${targetOrigin}$1)`
+      );
+      fixedCSS = fixedCSS.replace(
+        /url\(\s*['"]?(?!data:|http|\/\/|\/)([^'")]+)['"]?\s*\)/gi,
+        (match, path) => {
+          const cssDir = r.url.substring(0, r.url.lastIndexOf("/") + 1);
+          return `url(${cssDir}${path})`;
+        }
+      );
+      html = html.replace(r.tag, `<style data-nexoos-inlined="${r.url}">${fixedCSS}</style>`);
+    }
+  }
+
+  return html;
+}
+
 // Strip client-side framework JS from Puppeteer-rendered HTML
-// These scripts try to hydrate the page and fail on a different origin
 function stripFrameworkScripts(html) {
-  // Remove Next.js bootstrap/hydration scripts
   html = html.replace(/<script[^>]*>self\.__next_f\.push[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*src="\/_next\/static[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*id="__NEXT_DATA__"[\s\S]*?<\/script>/gi, '');
-  
-  // Remove Nuxt hydration scripts
   html = html.replace(/<script[^>]*>window\.__NUXT__[\s\S]*?<\/script>/gi, '');
-  
-  // Remove Remix hydration scripts
   html = html.replace(/<script[^>]*>window\.__remixContext[\s\S]*?<\/script>/gi, '');
-  
   return html;
 }
 
 // Inject Nexoos scripts into the HTML
 function injectScripts(html, targetUrl, wasBrowserRendered = false) {
-  // If this was rendered by Puppeteer (JS framework), strip hydration scripts
-  // to prevent "This page couldn't load" errors
   if (wasBrowserRendered) {
     html = stripFrameworkScripts(html);
   }
 
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
-  
-  // The urlFix + base tag go INSIDE <head> to preserve <!DOCTYPE> (prevents quirks mode)
+
+  // Everything goes INSIDE <head> to preserve <!DOCTYPE> (prevents quirks mode)
+  // Use unsafe-url referrer so images load with a referer header (prevents hotlink blocking)
   const headInjection = `<base href="${baseHref}">` +
+    `<meta name="referrer" content="unsafe-url">` +
     `<script data-nexoos="url-fix">history.replaceState(null,'','${targetUrl.pathname}${targetUrl.search || ''}');` +
     `Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});</script>`;
 
@@ -209,31 +270,22 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false) {
 
   return html;
 }
-// Detect if the HTML is a JS-rendered shell that needs a real browser to render
+
+// Detect if the HTML is a JS-rendered shell
 function needsBrowserRendering(html) {
-  // Count real stylesheet links
   const stylesheetCount = (html.match(/<link[^>]+rel=["']stylesheet["'][^>]*>/gi) || []).length;
-  // Count style tags with actual CSS (not empty)
   const styleTagCount = (html.match(/<style[^>]*>[^<]{50,}<\/style>/gi) || []).length;
-  
-  // Check for JS framework shell markers
+
   const isNextJS = /self\.__next_f\.push|__NEXT_DATA__|__next/i.test(html);
   const isReactSPA = /<div\s+id=["'](?:root|app|__next)["'][^>]*>\s*<\/div>/i.test(html);
   const isNuxt = /__NUXT__|window\.__nuxt/i.test(html);
   const isRemix = /window\.__remixContext/i.test(html);
-  
+
   const isJSFramework = isNextJS || isReactSPA || isNuxt || isRemix;
-  
-  // If it's a JS framework with very few stylesheets, it needs browser rendering
-  if (isJSFramework && stylesheetCount <= 2 && styleTagCount <= 1) {
-    return true;
-  }
-  
-  // If there's almost no CSS at all, something is wrong
-  if (stylesheetCount === 0 && styleTagCount === 0) {
-    return true;
-  }
-  
+
+  if (isJSFramework && stylesheetCount <= 2 && styleTagCount <= 1) return true;
+  if (stylesheetCount === 0 && styleTagCount === 0) return true;
+
   return false;
 }
 
@@ -247,8 +299,6 @@ export async function GET(request) {
 
   try {
     const targetUrl = new URL(url);
-
-    // Step 1: Quick fetch (4s timeout) — works for most normal sites
     const result = await quickFetch(url);
 
     let html;
@@ -257,25 +307,31 @@ export async function GET(request) {
     if (result.ok && result.html && result.html.trim().length > 0) {
       html = result.html;
 
-      // Step 2: Check if the HTML is a JS-rendered shell (needs full browser)
       if (needsBrowserRendering(html)) {
-        console.log(`[proxy] JS-rendered site detected for ${url}, using Puppeteer for full render`);
+        console.log(`[proxy] JS-rendered site detected for ${url}, using Puppeteer`);
         try {
           html = await fetchWithBrowser(url);
           usedBrowser = true;
         } catch (browserError) {
-          console.log(`[proxy] Puppeteer failed for JS render: ${browserError.message}, using fetch HTML`);
-          // Fall back to the simple fetch HTML — better than nothing
+          console.log(`[proxy] Puppeteer failed: ${browserError.message}, using fetch HTML`);
         }
       }
     } else {
-      // Step 2b: Fetch failed (non-2xx or empty) — use Puppeteer
       console.log(`[proxy] Quick fetch failed for ${url} (HTTP ${result.status}), using Puppeteer`);
       html = await fetchWithBrowser(url);
       usedBrowser = true;
     }
 
-    // Step 3: Inject scripts and return
+    // Inline external CSS from the target domain to bypass referer-based blocking
+    if (!usedBrowser) {
+      try {
+        html = await inlineExternalCSS(html, targetUrl.origin);
+      } catch (e) {
+        console.log(`[proxy] CSS inlining failed: ${e.message}`);
+      }
+    }
+
+    // Inject Nexoos scripts
     html = injectScripts(html, targetUrl, usedBrowser);
 
     return new NextResponse(html, {
