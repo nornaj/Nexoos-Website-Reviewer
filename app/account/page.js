@@ -2,17 +2,17 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { useUser } from "@/lib/context";
+import { useAuth } from "@/lib/auth";
 import { useToast } from "../components/Toast";
 
 export default function AccountPage() {
-  const { user, updateUser } = useUser();
+  const { credentials, updateCredentials, logout } = useAuth();
   const { addToast } = useToast();
 
   const [form, setForm] = useState({
-    name: user.name,
-    username: user.username,
-    email: user.email,
+    name: credentials.name,
+    username: credentials.username,
+    email: credentials.email,
     password: "",
     confirmPassword: "",
   });
@@ -54,10 +54,21 @@ export default function AccountPage() {
       updates.password = form.password;
     }
 
-    updateUser(updates);
+    updateCredentials(updates);
+
+    // If username or password changed, log out so next sign-in uses new creds
+    const usernameChanged = updates.username !== credentials.username;
+    const passwordChanged = changingPassword && form.password;
+
     setChangingPassword(false);
     setForm((prev) => ({ ...prev, password: "", confirmPassword: "" }));
-    addToast("Account updated successfully", "success");
+
+    if (usernameChanged || passwordChanged) {
+      addToast("Credentials updated — please sign in with your new details", "success");
+      setTimeout(() => logout(), 1200);
+    } else {
+      addToast("Account updated successfully", "success");
+    }
   };
 
   const updateField = (field, value) => {
