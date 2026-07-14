@@ -31,13 +31,14 @@ export default function PublicReviewPage() {
 
   useEffect(() => {
     if (project) {
-      setComments(getCommentsByProject(project.id));
+      getCommentsByProject(project.id).then(setComments);
     }
   }, [project]);
 
-  const refreshComments = useCallback(() => {
+  const refreshComments = useCallback(async () => {
     if (project) {
-      setComments(getCommentsByProject(project.id));
+      const data = await getCommentsByProject(project.id);
+      setComments(data);
     }
   }, [project]);
 
@@ -56,7 +57,7 @@ export default function PublicReviewPage() {
   );
 
   const handlePopupSubmit = useCallback(
-    (text) => {
+    async (text) => {
       if (!popup.annotationData) return;
 
       const isRequired = popup.type === "comment" || popup.type === "suggestion";
@@ -65,14 +66,14 @@ export default function PublicReviewPage() {
         return;
       }
 
-      addComment(project.id, {
+      await addComment(project.id, {
         type: popup.type,
         text: text || "",
         author: authorName,
         position: popup.annotationData.position,
       });
 
-      refreshComments();
+      await refreshComments();
       setActiveTool("select");
       setPopup({ open: false, type: null, position: null, annotationData: null });
     },
@@ -84,33 +85,33 @@ export default function PublicReviewPage() {
   }, []);
 
   const handleAddGeneralComment = useCallback(
-    (text) => {
-      addComment(project.id, {
+    async (text) => {
+      await addComment(project.id, {
         type: "comment",
         text,
         author: authorName,
         position: null,
       });
-      refreshComments();
+      await refreshComments();
     },
     [project, authorName, refreshComments]
   );
 
   const handleResolve = useCallback(
-    (commentId) => {
-      resolveComment(project.id, commentId);
-      refreshComments();
+    async (commentId) => {
+      await resolveComment(project.id, commentId);
+      await refreshComments();
     },
     [project, refreshComments]
   );
 
   const handleReply = useCallback(
-    (commentId, text) => {
-      addReply(project.id, commentId, {
+    async (commentId, text) => {
+      await addReply(project.id, commentId, {
         text,
         author: authorName,
       });
-      refreshComments();
+      await refreshComments();
     },
     [project, authorName, refreshComments]
   );

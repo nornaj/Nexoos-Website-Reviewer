@@ -34,7 +34,7 @@ export default function EditorPage() {
   // Load comments
   useEffect(() => {
     if (project) {
-      setComments(getCommentsByProject(project.id));
+      getCommentsByProject(project.id).then(setComments);
     }
   }, [project]);
 
@@ -69,9 +69,10 @@ export default function EditorPage() {
     return () => window.removeEventListener("keydown", handleKey);
   }, [popup.open]);
 
-  const refreshComments = useCallback(() => {
+  const refreshComments = useCallback(async () => {
     if (project) {
-      setComments(getCommentsByProject(project.id));
+      const data = await getCommentsByProject(project.id);
+      setComments(data);
     }
   }, [project]);
 
@@ -89,7 +90,7 @@ export default function EditorPage() {
   );
 
   const handlePopupSubmit = useCallback(
-    (text) => {
+    async (text) => {
       if (!popup.annotationData) return;
 
       const isRequired = popup.type === "comment" || popup.type === "suggestion";
@@ -98,14 +99,14 @@ export default function EditorPage() {
         return;
       }
 
-      addComment(project.id, {
+      await addComment(project.id, {
         type: popup.type,
         text: text || "",
         author: user?.name || "Reviewer",
         position: popup.annotationData.position,
       });
 
-      refreshComments();
+      await refreshComments();
       setActiveTool("select");
       setPopup({ open: false, type: null, position: null, annotationData: null });
     },
@@ -117,42 +118,42 @@ export default function EditorPage() {
   }, []);
 
   const handleAddGeneralComment = useCallback(
-    (text) => {
-      addComment(project.id, {
+    async (text) => {
+      await addComment(project.id, {
         type: "comment",
         text,
         author: user?.name || "Reviewer",
         position: null,
       });
-      refreshComments();
+      await refreshComments();
     },
     [project, user, refreshComments]
   );
 
   const handleResolve = useCallback(
-    (commentId) => {
-      resolveComment(project.id, commentId);
-      refreshComments();
+    async (commentId) => {
+      await resolveComment(project.id, commentId);
+      await refreshComments();
     },
     [project, refreshComments]
   );
 
   const handleDelete = useCallback(
-    (commentId) => {
-      deleteComment(project.id, commentId);
-      refreshComments();
+    async (commentId) => {
+      await deleteComment(project.id, commentId);
+      await refreshComments();
       if (activeCommentId === commentId) setActiveCommentId(null);
     },
     [project, activeCommentId, refreshComments]
   );
 
   const handleReply = useCallback(
-    (commentId, text) => {
-      addReply(project.id, commentId, {
+    async (commentId, text) => {
+      await addReply(project.id, commentId, {
         text,
         author: user?.name || "Reviewer",
       });
-      refreshComments();
+      await refreshComments();
     },
     [project, user, refreshComments]
   );

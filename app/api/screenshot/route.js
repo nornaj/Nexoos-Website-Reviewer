@@ -12,6 +12,27 @@ function getCachePath(url) {
   return path.join(CACHE_DIR, `${hash}.png`);
 }
 
+// Find a locally installed Chrome for development
+function getLocalChromePath() {
+  const paths = [
+    // Windows
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    process.env.LOCALAPPDATA + "\\Google\\Chrome\\Application\\chrome.exe",
+    // Mac
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    // Linux
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+  ];
+  for (const p of paths) {
+    try {
+      if (p && fs.existsSync(p)) return p;
+    } catch {}
+  }
+  return null;
+}
+
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const url = searchParams.get("url");
@@ -44,11 +65,35 @@ export async function GET(request) {
 
   let browser;
   try {
+    // Use @sparticuz/chromium in production (Vercel), local Chrome in dev
+    const isDev = process.env.NODE_ENV === "development";
+    let executablePath;
+    let args;
+
+    if (isDev) {
+      executablePath = getLocalChromePath();
+      if (!executablePath) {
+        return NextResponse.json(
+          { error: "No local Chrome found. Install Google Chrome for thumbnails." },
+          { status: 500 }
+        );
+      }
+      args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+      ];
+    } else {
+      executablePath = await chromium.executablePath();
+      args = chromium.args;
+    }
+
     browser = await puppeteer.launch({
-      args: chromium.args,
+      headless: isDev ? "new" : chromium.headless,
+      executablePath,
+      args,
       defaultViewport: { width: 1280, height: 800 },
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
     });
 
     const page = await browser.newPage();

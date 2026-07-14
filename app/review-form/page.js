@@ -43,7 +43,7 @@ export default function ReviewForm() {
     return errs;
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     const errs = validate();
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
@@ -54,13 +54,18 @@ export default function ReviewForm() {
       ? form.url
       : `https://${form.url}`;
 
-    const newProject = addProject({
+    const newProject = await addProject({
       ...form,
       url,
     });
 
-    addToast(`"${newProject.name}" created`, "success");
-    router.push(`/project/${newProject.id}`);
+    if (newProject) {
+      addToast(`"${newProject.name}" created`, "success");
+      router.push(`/project/${newProject.id}`);
+    } else {
+      addToast("Failed to create project", "error");
+      setSubmitting(false);
+    }
   };
 
   const updateField = (field, value) => {

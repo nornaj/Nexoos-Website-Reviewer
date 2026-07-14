@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 
 function formatExactDate(timestamp) {
   const d = new Date(timestamp);
@@ -127,9 +127,23 @@ export default function WebsitePreview({
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const overlayRef = useRef(null);
+  const iframeRef = useRef(null);
+  const scrollContainerRef = useRef(null);
   const [dragging, setDragging] = useState(null);
   const [hoveredPin, setHoveredPin] = useState(null);
   const hoverTimeout = useRef(null);
+  const [scrollOffset, setScrollOffset] = useState({ x: 0, y: 0 });
+
+  // Listen for scroll messages from iframe (same-origin) or poll scroll position
+  useEffect(() => {
+    const handleMessage = (e) => {
+      if (e.data?.type === "nexoos-scroll") {
+        setScrollOffset({ x: e.data.scrollX, y: e.data.scrollY });
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, []);
 
   const handleIframeLoad = () => {
     setLoading(false);
@@ -157,13 +171,50 @@ export default function WebsitePreview({
     hoverTimeout.current = setTimeout(() => setHoveredPin(null), 150);
   };
 
+  // Scroll preview to a specific annotation position
+  const scrollToAnnotation = useCallback((annotation) => {
+    if (!scrollContainerRef.current || !annotation?.position) return;
+    const container = scrollContainerRef.current;
+    const scaleF = zoom / 100;
+    // Annotation position is % of overlay, convert to pixels
+    const overlayEl = overlayRef.current;
+    if (!overlayEl) return;
+    const targetY = (annotation.position.y / 100) * overlayEl.scrollHeight * scaleF;
+    const targetX = (annotation.position.x / 100) * overlayEl.scrollWidth * scaleF;
+    container.scrollTo({
+      top: targetY - container.clientHeight / 3,
+      left: Math.max(0, targetX - container.clientWidth / 2),
+      behavior: "smooth",
+    });
+  }, [zoom]);
+
+  // When activeCommentId changes, scroll to that annotation
+  useEffect(() => {
+    if (activeCommentId) {
+      const annotation = annotations.find((a) => a.id === activeCommentId);
+      if (annotation?.position) {
+        scrollToAnnotation(annotation);
+      }
+    }
+  }, [activeCommentId, annotations, scrollToAnnotation]);
+
+  // Use document-relative positions: store position relative to 
+  // the full page height, not just the visible viewport
+  const getDocPosition = useCallback((e) => {
+    const overlay = overlayRef.current;
+    if (!overlay) return { x: 0, y: 0 };
+    const rect = overlay.getBoundingClientRect();
+    // Position relative to overlay's full size (which matches iframe content area)
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    return { x, y };
+  }, []);
+
   const handleOverlayClick = useCallback(
     (e) => {
       if (activeTool === "select") return;
 
-      const rect = overlayRef.current.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 100;
-      const y = ((e.clientY - rect.top) / rect.height) * 100;
+      const { x, y } = getDocPosition(e);
 
       onAnnotationAdd({
         type: activeTool,
@@ -172,33 +223,27 @@ export default function WebsitePreview({
         clientY: e.clientY,
       });
     },
-    [activeTool, onAnnotationAdd]
+    [activeTool, onAnnotationAdd, getDocPosition]
   );
 
   const handleMouseDown = useCallback(
     (e) => {
       if (activeTool !== "highlight" && activeTool !== "approve") return;
 
-      const rect = overlayRef.current.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 100;
-      const y = ((e.clientY - rect.top) / rect.height) * 100;
-
+      const { x, y } = getDocPosition(e);
       setDragging({ startX: x, startY: y, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY });
     },
-    [activeTool]
+    [activeTool, getDocPosition]
   );
 
   const handleMouseMove = useCallback(
     (e) => {
       if (!dragging) return;
 
-      const rect = overlayRef.current.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 100;
-      const y = ((e.clientY - rect.top) / rect.height) * 100;
-
+      const { x, y } = getDocPosition(e);
       setDragging((prev) => ({ ...prev, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY }));
     },
-    [dragging]
+    [dragging, getDocPosition]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -245,7 +290,7 @@ export default function WebsitePreview({
   };
 
   return (
-    <div className="preview-panel">
+    <div className="preview-panel" ref={scrollContainerRef}>
       {loading && (
         <div className="preview-loading">
           <div className="preview-spinner" />
@@ -274,6 +319,7 @@ export default function WebsitePreview({
           style={{ transform: `scale(${zoom / 100})`, transformOrigin: "top left", width: `${10000 / zoom}%`, height: `${10000 / zoom}%` }}
         >
           <iframe
+            ref={iframeRef}
             src={url}
             className="preview-iframe"
             title="Website preview"

@@ -56,9 +56,9 @@ export default function HomePage() {
     setDeleteModal({ open: true, project });
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (deleteModal.project) {
-      deleteProject(deleteModal.project.id);
+      await deleteProject(deleteModal.project.id);
       addToast(`"${deleteModal.project.name}" deleted`, "success");
     }
     setDeleteModal({ open: false, project: null });

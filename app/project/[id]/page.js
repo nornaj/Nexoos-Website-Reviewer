@@ -51,14 +51,14 @@ export default function ProjectDetail() {
     );
   }
 
-  const handleSave = () => {
-    updateProject(id, form);
+  const handleSave = async () => {
+    await updateProject(id, form);
     setEditing(false);
     addToast("Project updated", "success");
   };
 
-  const handleDelete = () => {
-    deleteProject(id);
+  const handleDelete = async () => {
+    await deleteProject(id);
     addToast(`"${project.name}" deleted`, "success");
     router.push("/");
   };
