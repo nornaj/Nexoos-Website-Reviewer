@@ -30,12 +30,16 @@ export async function GET(request) {
 
     let html = await res.text();
 
+    // Inject URL override FIRST — before any app scripts run
+    // This makes the SPA router see the original URL, not /api/proxy
+    const urlOverride = `<script data-nexoos="url-fix">history.replaceState(null, '', '${targetUrl.pathname}${targetUrl.search}');</script>`;
+
     // Insert <base> tag so all relative URLs resolve correctly
     const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`; 
     if (/<head/i.test(html)) {
-      html = html.replace(/<head([^>]*)>/i, `<head$1><base href="${baseHref}">`);
+      html = html.replace(/<head([^>]*)>/i, `<head$1>${urlOverride}<base href="${baseHref}">`);
     } else {
-      html = `<base href="${baseHref}">` + html;
+      html = urlOverride + `<base href="${baseHref}">` + html;
     }
 
     // Inject scroll-tracking script + link interception
