@@ -66,45 +66,17 @@ function PinTooltip({ annotation, onResolve, onDelete, onReply, isGuest }) {
       )}
 
       <div className="pin-tooltip-actions">
-        <button
-          className="pin-tooltip-action-btn"
-          onClick={(e) => { e.stopPropagation(); setShowReply(!showReply); }}
-        >
-          💬 Reply
-        </button>
-        <button
-          className="pin-tooltip-action-btn"
-          onClick={(e) => { e.stopPropagation(); onResolve(annotation.id); }}
-        >
-          {annotation.resolved ? "↩ Reopen" : "☑ Resolve"}
-        </button>
+        <button className="pin-tooltip-action-btn" onClick={(e) => { e.stopPropagation(); setShowReply(!showReply); }}>💬 Reply</button>
+        <button className="pin-tooltip-action-btn" onClick={(e) => { e.stopPropagation(); onResolve(annotation.id); }}>{annotation.resolved ? "↩ Reopen" : "☑ Resolve"}</button>
         {!isGuest && (
-          <button
-            className="pin-tooltip-action-btn pin-tooltip-action-btn--danger"
-            onClick={(e) => { e.stopPropagation(); onDelete(annotation.id); }}
-          >
-            🗑 Delete
-          </button>
+          <button className="pin-tooltip-action-btn pin-tooltip-action-btn--danger" onClick={(e) => { e.stopPropagation(); onDelete(annotation.id); }}>🗑 Delete</button>
         )}
       </div>
 
       {showReply && (
         <div className="pin-tooltip-reply-form" onClick={(e) => e.stopPropagation()}>
-          <input
-            className="pin-tooltip-reply-input"
-            placeholder="Write a reply…"
-            value={replyText}
-            onChange={(e) => setReplyText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            autoFocus
-          />
-          <button
-            className="pin-tooltip-reply-send"
-            onClick={handleReplySubmit}
-            disabled={!replyText.trim()}
-          >
-            Send
-          </button>
+          <input className="pin-tooltip-reply-input" placeholder="Write a reply…" value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyDown} autoFocus />
+          <button className="pin-tooltip-reply-send" onClick={handleReplySubmit} disabled={!replyText.trim()}>Send</button>
         </div>
       )}
     </div>
@@ -125,14 +97,16 @@ export default function WebsitePreview({
   isGuest = false,
 }) {
   const [loading, setLoading] = useState(true);
-  const [screenshotUrl, setScreenshotUrl] = useState(null);
-  const [mode, setMode] = useState("loading");
   const overlayRef = useRef(null);
-  const scrollContainerRef = useRef(null);
+  const iframeRef = useRef(null);
   const [dragging, setDragging] = useState(null);
   const [hoveredPin, setHoveredPin] = useState(null);
   const hoverTimeout = useRef(null);
   const didDragRef = useRef(false);
+
+  // Scroll state from the proxied iframe
+  const [iframeScroll, setIframeScroll] = useState({ x: 0, y: 0, scrollHeight: 0, clientHeight: 0 });
+  const iframeScrollRef = useRef({ x: 0, y: 0, scrollHeight: 0, clientHeight: 0 });
 
   // Refs for event handlers to avoid stale closures
   const activeToolRef = useRef(activeTool);
@@ -140,307 +114,257 @@ export default function WebsitePreview({
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { onAnnotationAddRef.current = onAnnotationAdd; }, [onAnnotationAdd]);
 
-  // Screenshot loading with multiple fallback sources
+  // The proxied URL
+  const proxyUrl = url ? `/api/proxy?url=${encodeURIComponent(url)}` : "";
+
+  // Listen for scroll messages from the proxied iframe
   useEffect(() => {
-    if (!url) return;
-    setLoading(true);
-    setMode("loading");
-
-    // Source 1: Our own API (uses local Chrome in dev, @sparticuz/chromium on Vercel)
-    const ownApi = `/api/screenshot?url=${encodeURIComponent(url)}&fullPage=true`;
-    // Source 2: thum.io (free external screenshot service, no API key needed)
-    const thumIo = `https://image.thum.io/get/fullpage/width/1280/${url}`;
-
-    let cancelled = false;
-
-    function tryLoadImage(src) {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(src);
-        img.onerror = () => reject();
-        img.src = src;
-
-        // Timeout after 30s per source
-        setTimeout(() => reject(), 30000);
-      });
+    function handleMessage(e) {
+      if (!e.data || e.data.type !== "nexoos-scroll") return;
+      const s = {
+        x: e.data.scrollX || 0,
+        y: e.data.scrollY || 0,
+        scrollHeight: e.data.scrollHeight || 0,
+        clientHeight: e.data.clientHeight || 0,
+      };
+      iframeScrollRef.current = s;
+      setIframeScroll(s);
     }
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, []);
 
-    async function loadScreenshot() {
-      // Try our own API first
-      try {
-        const result = await tryLoadImage(ownApi);
-        if (!cancelled) {
-          setScreenshotUrl(result);
-          setMode("screenshot");
-          setLoading(false);
-        }
-        return;
-      } catch {}
-
-      // Try external service
-      try {
-        const result = await tryLoadImage(thumIo);
-        if (!cancelled) {
-          setScreenshotUrl(result);
-          setMode("screenshot");
-          setLoading(false);
-        }
-        return;
-      } catch {}
-
-      // All failed — fall back to iframe
-      if (!cancelled) {
-        setMode("iframe");
-        setLoading(false);
-      }
-    }
-
-    loadScreenshot();
-    return () => { cancelled = true; };
-  }, [url]);
-
-  // Scroll to annotation when clicking sidebar
+  // Scroll iframe to annotation when clicking sidebar
   useEffect(() => {
-    if (!activeCommentId || !scrollContainerRef.current) return;
+    if (!activeCommentId || !iframeRef.current) return;
     const annotation = annotations.find((a) => a.id === activeCommentId);
-    if (!annotation?.position) return;
+    if (!annotation?.position?.pageY) return;
 
-    const container = scrollContainerRef.current;
-    const scaleF = zoom / 100;
-
-    if (mode === "screenshot") {
-      const imgEl = container.querySelector(".preview-page-image");
-      if (!imgEl) return;
-      const targetY = (annotation.position.y / 100) * imgEl.naturalHeight * scaleF;
-      container.scrollTo({
-        top: targetY - container.clientHeight / 3,
-        behavior: "smooth",
-      });
-    }
-  }, [activeCommentId, annotations, zoom, mode]);
+    try {
+      iframeRef.current.contentWindow.postMessage(
+        { type: "nexoos-scrollTo", top: annotation.position.pageY - 200 },
+        "*"
+      );
+    } catch {}
+  }, [activeCommentId, annotations]);
 
   const handlePinEnter = (id) => {
     if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
     setHoveredPin(id);
   };
-
   const handlePinLeave = () => {
     hoverTimeout.current = setTimeout(() => setHoveredPin(null), 150);
   };
-
   const handleTooltipEnter = () => {
     if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
   };
-
   const handleTooltipLeave = () => {
     hoverTimeout.current = setTimeout(() => setHoveredPin(null), 150);
   };
 
-  // Plain functions using refs — always fresh, no stale closures
+  // ─── Click: place annotation ───
   const handleOverlayClick = (e) => {
     const tool = activeToolRef.current;
     if (tool === "select") return;
-    if (didDragRef.current) {
-      didDragRef.current = false;
-      return;
-    }
+    if (didDragRef.current) { didDragRef.current = false; return; }
 
     const rect = overlayRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+    const yViewportPx = e.clientY - rect.top;
+
+    // Page-absolute position: viewport Y + iframe scroll offset
+    const scroll = iframeScrollRef.current;
+    const pageY = yViewportPx + scroll.y;
 
     onAnnotationAddRef.current({
       type: tool,
-      position: { x, y },
+      position: { x: xPct, pageY, viewportHeight: rect.height },
       clientX: e.clientX,
       clientY: e.clientY,
     });
   };
 
+  // ─── Drag: highlight/approve rectangle ───
   const handleMouseDown = (e) => {
     const tool = activeToolRef.current;
     if (tool !== "highlight" && tool !== "approve") return;
     didDragRef.current = false;
 
     const rect = overlayRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+    const yViewportPx = e.clientY - rect.top;
+    const scroll = iframeScrollRef.current;
+    const pageY = yViewportPx + scroll.y;
 
-    setDragging({ startX: x, startY: y, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY });
+    setDragging({
+      startX: xPct, startPageY: pageY,
+      currentX: xPct, currentPageY: pageY,
+      clientX: e.clientX, clientY: e.clientY,
+      viewportHeight: rect.height,
+    });
   };
 
   const handleMouseMove = (e) => {
     if (!dragging) return;
-
     const rect = overlayRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+    const yViewportPx = e.clientY - rect.top;
+    const scroll = iframeScrollRef.current;
+    const pageY = yViewportPx + scroll.y;
 
-    setDragging((prev) => ({ ...prev, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY }));
+    setDragging((prev) => ({
+      ...prev,
+      currentX: xPct, currentPageY: pageY,
+      clientX: e.clientX, clientY: e.clientY,
+    }));
   };
 
   const handleMouseUp = () => {
     if (!dragging) return;
+    const widthPct = Math.abs(dragging.currentX - dragging.startX);
+    const heightPx = Math.abs(dragging.currentPageY - dragging.startPageY);
 
-    const width = Math.abs(dragging.currentX - dragging.startX);
-    const height = Math.abs(dragging.currentY - dragging.startY);
-
-    if (width > 1 && height > 1) {
+    if (widthPct > 1 && heightPx > 5) {
       didDragRef.current = true;
       onAnnotationAddRef.current({
         type: activeToolRef.current,
         position: {
           x: Math.min(dragging.startX, dragging.currentX),
-          y: Math.min(dragging.startY, dragging.currentY),
-          width,
-          height,
+          pageY: Math.min(dragging.startPageY, dragging.currentPageY),
+          width: widthPct,
+          heightPx: heightPx,
+          viewportHeight: dragging.viewportHeight,
         },
         clientX: dragging.clientX,
         clientY: dragging.clientY,
       });
     }
-
     setDragging(null);
   };
 
-  const getAnnotationNumber = (annotation) => {
-    const idx = annotations.findIndex((a) => a.id === annotation.id);
-    return idx + 1;
-  };
+  const getAnnotationNumber = (a) => annotations.findIndex((ann) => ann.id === a.id) + 1;
 
   const renderTooltip = (a) => {
     if (hoveredPin !== a.id) return null;
     return (
       <div onMouseEnter={handleTooltipEnter} onMouseLeave={handleTooltipLeave}>
-        <PinTooltip
-          annotation={a}
-          onResolve={onResolve}
-          onDelete={onDelete}
-          onReply={onReply}
-          isGuest={isGuest}
-        />
+        <PinTooltip annotation={a} onResolve={onResolve} onDelete={onDelete} onReply={onReply} isGuest={isGuest} />
       </div>
     );
   };
 
-  const renderOverlay = () => (
-    <div
-      ref={overlayRef}
-      className={`preview-overlay${activeTool === "select" ? " mode-select" : ""}`}
-      onClick={handleOverlayClick}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-    >
-      {annotations.map((a) => {
-        if (a.position?.width && a.position?.height) {
+  // ─── Convert page-absolute Y to viewport-relative % ───
+  const pageYToViewportPct = (pageY, overlayHeight) => {
+    const viewportY = pageY - iframeScroll.y;
+    return (viewportY / overlayHeight) * 100;
+  };
+
+  const renderOverlay = () => {
+    const overlayHeight = overlayRef.current?.getBoundingClientRect().height || 1;
+
+    return (
+      <div
+        ref={overlayRef}
+        className={`preview-overlay${activeTool === "select" ? " mode-select" : ""}`}
+        onClick={handleOverlayClick}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+      >
+        {annotations.map((a) => {
+          const pos = a.position;
+          if (!pos) return null;
+
+          // Rectangle annotations
+          if (pos.width && pos.heightPx) {
+            const topPct = pageYToViewportPct(pos.pageY, overlayHeight);
+            const heightPct = (pos.heightPx / overlayHeight) * 100;
+            // Hide if completely off-screen
+            if (topPct > 100 || topPct + heightPct < 0) return null;
+
+            return (
+              <div
+                key={a.id}
+                className={`annotation-rect annotation-rect--${a.type}`}
+                style={{ left: `${pos.x}%`, top: `${topPct}%`, width: `${pos.width}%`, height: `${heightPct}%` }}
+                onMouseEnter={() => handlePinEnter(a.id)}
+                onMouseLeave={handlePinLeave}
+                onClick={(e) => { e.stopPropagation(); onPinClick(a.id); }}
+              >
+                {renderTooltip(a)}
+              </div>
+            );
+          }
+
+          // Pin annotations
+          const topPct = pageYToViewportPct(pos.pageY != null ? pos.pageY : (pos.y || 0), overlayHeight);
+          // Hide if off-screen
+          if (topPct > 105 || topPct < -5) return null;
+
           return (
             <div
               key={a.id}
-              className={`annotation-rect annotation-rect--${a.type}`}
-              style={{
-                left: `${a.position.x}%`,
-                top: `${a.position.y}%`,
-                width: `${a.position.width}%`,
-                height: `${a.position.height}%`,
-              }}
+              className={`annotation-pin annotation-pin--${a.type}${activeCommentId === a.id ? " active" : ""}`}
+              style={{ left: `${pos.x || 0}%`, top: `${topPct}%` }}
               onMouseEnter={() => handlePinEnter(a.id)}
               onMouseLeave={handlePinLeave}
-              onClick={(e) => {
-                e.stopPropagation();
-                onPinClick(a.id);
-              }}
+              onClick={(e) => { e.stopPropagation(); onPinClick(a.id); }}
             >
+              {getAnnotationNumber(a)}
               {renderTooltip(a)}
             </div>
           );
-        }
+        })}
 
-        return (
-          <div
-            key={a.id}
-            className={`annotation-pin annotation-pin--${a.type}${activeCommentId === a.id ? " active" : ""}`}
-            style={{
-              left: `${a.position?.x || 0}%`,
-              top: `${a.position?.y || 0}%`,
-            }}
-            onMouseEnter={() => handlePinEnter(a.id)}
-            onMouseLeave={handlePinLeave}
-            onClick={(e) => {
-              e.stopPropagation();
-              onPinClick(a.id);
-            }}
-          >
-            {getAnnotationNumber(a)}
-            {renderTooltip(a)}
-          </div>
-        );
-      })}
-
-      {dragging && (
-        <div
-          className={`annotation-rect annotation-rect--${activeTool}`}
-          style={{
-            left: `${Math.min(dragging.startX, dragging.currentX)}%`,
-            top: `${Math.min(dragging.startY, dragging.currentY)}%`,
-            width: `${Math.abs(dragging.currentX - dragging.startX)}%`,
-            height: `${Math.abs(dragging.currentY - dragging.startY)}%`,
-            opacity: 0.6,
-          }}
-        />
-      )}
-    </div>
-  );
+        {/* Drag preview rectangle */}
+        {dragging && (() => {
+          const topPct = pageYToViewportPct(Math.min(dragging.startPageY, dragging.currentPageY), overlayHeight);
+          const heightPct = (Math.abs(dragging.currentPageY - dragging.startPageY) / overlayHeight) * 100;
+          return (
+            <div
+              className={`annotation-rect annotation-rect--${activeTool}`}
+              style={{
+                left: `${Math.min(dragging.startX, dragging.currentX)}%`,
+                top: `${topPct}%`,
+                width: `${Math.abs(dragging.currentX - dragging.startX)}%`,
+                height: `${heightPct}%`,
+                opacity: 0.6,
+              }}
+            />
+          );
+        })()}
+      </div>
+    );
+  };
 
   return (
-    <div className="preview-panel" ref={scrollContainerRef}>
+    <div className="preview-panel">
       {loading && (
         <div className="preview-loading">
           <div className="preview-spinner" />
-          <span>Capturing page screenshot…</span>
+          <span>Loading website…</span>
         </div>
       )}
 
-      {mode === "screenshot" && screenshotUrl && (
-        <div
-          className="preview-screenshot-wrap"
-          style={{
-            transform: `scale(${zoom / 100})`,
-            transformOrigin: "top left",
-            width: `${10000 / zoom}%`,
-          }}
-        >
-          <img
-            src={screenshotUrl}
-            alt="Full page screenshot"
-            className="preview-page-image"
-            draggable={false}
-          />
-          {renderOverlay()}
-        </div>
-      )}
-
-      {mode === "iframe" && (
-        <div
-          className="preview-iframe-wrap"
-          style={{
-            transform: `scale(${zoom / 100})`,
-            transformOrigin: "top left",
-            width: `${10000 / zoom}%`,
-            height: `${10000 / zoom}%`,
-          }}
-        >
-          <iframe
-            src={url}
-            className="preview-iframe"
-            title="Website preview"
-            sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
-            onLoad={() => setLoading(false)}
-            onError={() => setLoading(false)}
-          />
-          {renderOverlay()}
-        </div>
-      )}
+      <div
+        className="preview-iframe-wrap"
+        style={{
+          transform: `scale(${zoom / 100})`,
+          transformOrigin: "top left",
+          width: `${10000 / zoom}%`,
+          height: `${10000 / zoom}%`,
+        }}
+      >
+        <iframe
+          ref={iframeRef}
+          src={proxyUrl}
+          className="preview-iframe"
+          title="Website preview"
+          onLoad={() => setLoading(false)}
+          onError={() => setLoading(false)}
+        />
+        {renderOverlay()}
+      </div>
     </div>
   );
 }

@@ -965,18 +965,7 @@ textarea.input-error:focus {
   to { transform: rotate(360deg); }
 }
 
-.preview-screenshot-wrap {
-  position: relative;
-  width: 100%;
-}
 
-.preview-page-image {
-  display: block;
-  width: 100%;
-  height: auto;
-  user-select: none;
-  -webkit-user-drag: none;
-}
 
 .preview-iframe-wrap {
   position: relative;
