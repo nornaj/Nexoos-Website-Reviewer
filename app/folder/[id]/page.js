@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useState, use } from "react";
+import { useState } from "react";
+import { useParams } from "next/navigation";
 import { useFolders, useProjects } from "@/lib/context";
 import { formatDate } from "@/lib/store";
-import { useToast } from "../../../components/Toast";
-import Modal from "../../../components/Modal";
-import EmptyState from "../../../components/EmptyState";
+import { useToast } from "@/app/components/Toast";
+import Modal from "@/app/components/Modal";
+import EmptyState from "@/app/components/EmptyState";
 
 function getBadgeClass(status) {
   switch (status) {
@@ -32,9 +33,8 @@ function getAvatarColor(name) {
   return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length];
 }
 
-export default function FolderPage({ params }) {
-  const resolvedParams = use(params);
-  const folderId = resolvedParams.id;
+export default function FolderPage() {
+  const { id: folderId } = useParams();
   const { folders } = useFolders();
   const { projects, loaded, addProject, deleteProject, getProjectsByFolder } = useProjects();
   const { addToast } = useToast();
