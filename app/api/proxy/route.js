@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 
 // Vercel serverless config — Puppeteer needs more time
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 // Find a locally installed Chrome for development
 function getLocalChromePath() {
@@ -53,10 +53,11 @@ async function fetchWithBrowser(url) {
 
   try {
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 20000 });
+    // Use domcontentloaded for speed — networkidle2 can take 10+ seconds
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
 
-    // Small delay for JS-rendered content
-    await new Promise((r) => setTimeout(r, 500));
+    // Brief wait for any JS rendering, but keep it short
+    await new Promise((r) => setTimeout(r, 300));
 
     const html = await page.content();
     await browser.close();
@@ -64,6 +65,32 @@ async function fetchWithBrowser(url) {
   } catch (error) {
     await browser.close().catch(() => {});
     throw error;
+  }
+}
+
+// Quick fetch with a tight timeout — we just want to see if a simple GET works
+async function quickFetch(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000); // 4s max
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    const html = await res.text();
+    return { ok: res.ok, status: res.status, html };
+  } catch (error) {
+    clearTimeout(timeout);
+    return { ok: false, status: 0, html: "" };
   }
 }
 
@@ -156,38 +183,19 @@ export async function GET(request) {
   try {
     const targetUrl = new URL(url);
 
-    // Step 1: Try a fast fetch() first
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-      redirect: "follow",
-    });
+    // Step 1: Quick fetch with 4s timeout — works for most normal sites
+    const result = await quickFetch(url);
 
-    let html = await res.text();
+    let html;
 
-    // Step 2: Fall back to Puppeteer if:
-    //   - HTTP status is NOT 2xx (e.g. 401, 403, 503 — even if there's an error page HTML)
-    //   - OR the body is empty (WAF blocked with no content)
-    // This covers both cases:
-    //   - nexoosgroup.com: 403 + empty body → Puppeteer
-    //   - narekn28.sg-host.com: 403 + error page HTML → Puppeteer
-    const needsBrowser = !res.ok || !html || html.trim().length === 0;
-
-    if (needsBrowser) {
-      console.log(`[proxy] Simple fetch failed for ${url} (HTTP ${res.status}, body: ${html?.length || 0} bytes), falling back to Puppeteer`);
-      try {
-        html = await fetchWithBrowser(url);
-      } catch (browserError) {
-        console.log(`[proxy] Puppeteer also failed for ${url}: ${browserError.message}`);
-        // If Puppeteer failed but simple fetch had some HTML, use it as last resort
-        if (!html || html.trim().length === 0) {
-          throw browserError;
-        }
-      }
+    if (result.ok && result.html && result.html.trim().length > 0) {
+      // Simple fetch worked — fast path
+      html = result.html;
+    } else {
+      // Step 2: Simple fetch failed (non-2xx, empty, or timed out)
+      // Use Puppeteer headless browser to bypass WAF/Cloudflare/auth walls
+      console.log(`[proxy] Quick fetch failed for ${url} (HTTP ${result.status}, body: ${result.html?.length || 0} bytes), using Puppeteer`);
+      html = await fetchWithBrowser(url);
     }
 
     // Step 3: Inject our scripts and return
