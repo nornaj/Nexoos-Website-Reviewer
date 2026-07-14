@@ -1,4 +1,5 @@
-import puppeteer from "puppeteer";
+import chromium from "@sparticuz/chromium";
+import puppeteer from "puppeteer-core";
 import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
@@ -9,20 +10,6 @@ const CACHE_DIR = path.join(process.cwd(), ".next", "cache", "screenshots");
 function getCachePath(url) {
   const hash = crypto.createHash("md5").update(url).digest("hex");
   return path.join(CACHE_DIR, `${hash}.png`);
-}
-
-async function closeBrowser(browser) {
-  try {
-    if (browser) {
-      const pages = await browser.pages();
-      for (const page of pages) {
-        await page.close().catch(() => {});
-      }
-      await browser.close();
-    }
-  } catch {
-    // Ignore EBUSY errors on Windows during cleanup
-  }
 }
 
 export async function GET(request) {
@@ -58,18 +45,13 @@ export async function GET(request) {
   let browser;
   try {
     browser = await puppeteer.launch({
-      headless: "new",
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--single-process",
-      ],
+      args: chromium.args,
+      defaultViewport: { width: 1280, height: 800 },
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
     await page.goto(url, { waitUntil: "networkidle2", timeout: 20000 });
 
     // Small delay for animations/lazy images
@@ -80,7 +62,7 @@ export async function GET(request) {
       clip: { x: 0, y: 0, width: 1280, height: 800 },
     });
 
-    await closeBrowser(browser);
+    await browser.close().catch(() => {});
 
     // Cache the screenshot
     fs.writeFileSync(cachePath, screenshot);
@@ -92,7 +74,7 @@ export async function GET(request) {
       },
     });
   } catch (error) {
-    await closeBrowser(browser);
+    if (browser) await browser.close().catch(() => {});
     return NextResponse.json(
       { error: "Failed to capture screenshot", details: error.message },
       { status: 500 }
