@@ -30,7 +30,7 @@ export default function ProjectDetail() {
         status: project.status,
         notes: project.notes,
       });
-      setComments(getCommentsByProject(project.id));
+      getCommentsByProject(project.id).then(setComments);
     }
   }, [project]);
 
