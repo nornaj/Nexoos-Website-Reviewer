@@ -108,17 +108,16 @@ export default function FolderPage() {
                 </svg>
               </button>
               <div className="card-thumb">
-                {project.url && (
+                {project.url ? (
                   <img
-                    className="card-thumb-favicon"
-                    src={`https://www.google.com/s2/favicons?domain=${encodeURIComponent(new URL(project.url.startsWith("http") ? project.url : `https://${project.url}`).hostname)}&sz=128`}
-                    alt=""
+                    src={`https://image.thum.io/get/width/600/crop/400/${project.url}`}
+                    alt={`${project.name} screenshot`}
                     onError={(e) => {
                       e.target.style.display = "none";
                       e.target.nextSibling.style.display = "flex";
                     }}
                   />
-                )}
+                ) : null}
                 <div
                   className="card-thumb-fallback"
                   style={{
