@@ -54,7 +54,9 @@ async function fetchWithBrowser(url) {
 
   try {
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "networkidle0", timeout: 20000 });
+    // Use networkidle2 (allows 2 open connections) — networkidle0 is too strict
+    // for sites with analytics, websockets, or continuous polling
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
     await new Promise((r) => setTimeout(r, 1000));
 
     // Wait for body to have real content
@@ -506,9 +508,21 @@ export async function GET(request) {
         }
       }
     } else {
+      // Quick fetch failed — try Puppeteer, but fall back gracefully
       console.log(`[proxy] Quick fetch failed for ${url} (HTTP ${result.status}), using Puppeteer`);
-      html = await fetchWithBrowser(url);
-      usedBrowser = true;
+      try {
+        html = await fetchWithBrowser(url);
+        usedBrowser = true;
+      } catch (browserError) {
+        console.log(`[proxy] Puppeteer also failed: ${browserError.message}`);
+        // If quick fetch got SOME html (even with error status), use it
+        if (result.html && result.html.trim().length > 0) {
+          html = result.html;
+        } else {
+          // Last resort: return a friendly error page
+          html = `<!DOCTYPE html><html><head><title>Unable to load</title></head><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0"><div style="text-align:center;max-width:500px"><h2>Unable to load this website</h2><p>The website may be blocking automated access or is temporarily unavailable.</p><p style="color:#888;font-size:14px">${browserError.message}</p></div></body></html>`;
+        }
+      }
     }
 
     // Always inline external CSS to bypass cross-origin blocking
