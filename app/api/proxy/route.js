@@ -531,6 +531,10 @@ export async function GET(request) {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "public, max-age=300",
+        "X-Frame-Options": "ALLOWALL",
+        "Content-Security-Policy": "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data: blob:; style-src * 'unsafe-inline'; script-src * 'unsafe-inline' 'unsafe-eval'; font-src * data:;",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+        "Cross-Origin-Embedder-Policy": "unsafe-none",
       },
     });
   } catch (error) {
