@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback } from "react";
 
 function formatExactDate(timestamp) {
   const d = new Date(timestamp);
@@ -127,48 +127,12 @@ export default function WebsitePreview({
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const overlayRef = useRef(null);
-  const iframeRef = useRef(null);
   const [dragging, setDragging] = useState(null);
   const [hoveredPin, setHoveredPin] = useState(null);
   const hoverTimeout = useRef(null);
 
-  // Track the iframe's internal scroll offset via polling
-  const [iframeScroll, setIframeScroll] = useState({ x: 0, y: 0 });
-  const scrollPollRef = useRef(null);
-
-  useEffect(() => {
-    const poll = () => {
-      try {
-        const iframe = iframeRef.current;
-        if (iframe && iframe.contentWindow) {
-          const sx = iframe.contentWindow.scrollX || 0;
-          const sy = iframe.contentWindow.scrollY || 0;
-          setIframeScroll((prev) => {
-            if (prev.x !== sx || prev.y !== sy) return { x: sx, y: sy };
-            return prev;
-          });
-        }
-      } catch {
-        // Cross-origin: can't access scroll — that's OK
-      }
-    };
-    scrollPollRef.current = setInterval(poll, 100);
-    return () => clearInterval(scrollPollRef.current);
-  }, []);
-
   const handleIframeLoad = () => {
     setLoading(false);
-    // Try to inject scroll listener for same-origin iframes
-    try {
-      const win = iframeRef.current?.contentWindow;
-      if (win) {
-        win.addEventListener("scroll", () => {
-          setIframeScroll({ x: win.scrollX || 0, y: win.scrollY || 0 });
-        });
-      }
-    } catch {
-      // Cross-origin — polling handles this
-    }
   };
 
   const handleIframeError = () => {
@@ -193,70 +157,64 @@ export default function WebsitePreview({
     hoverTimeout.current = setTimeout(() => setHoveredPin(null), 150);
   };
 
-  /**
-   * Convert a click to a DOCUMENT-RELATIVE position.
-   * We store: x% across the viewport width, y in PIXELS from the top of the page
-   * (viewport-relative y + scrollY). This means the pin is anchored to page content.
-   */
-  const getDocPosition = useCallback((e) => {
-    const overlay = overlayRef.current;
-    if (!overlay) return { x: 0, y: 0, scrollY: 0 };
-    const rect = overlay.getBoundingClientRect();
-    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
-    // Y position = viewport-relative pixels + iframe scroll offset
-    const yViewportPx = e.clientY - rect.top;
-    const yPagePx = yViewportPx + iframeScroll.y;
-    return { x: xPct, y: yPagePx, viewportHeight: rect.height };
-  }, [iframeScroll]);
-
   const handleOverlayClick = useCallback(
     (e) => {
       if (activeTool === "select") return;
-      const { x, y, viewportHeight } = getDocPosition(e);
+
+      const rect = overlayRef.current.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * 100;
+      const y = ((e.clientY - rect.top) / rect.height) * 100;
 
       onAnnotationAdd({
         type: activeTool,
-        position: { x, y, viewportHeight },
+        position: { x, y },
         clientX: e.clientX,
         clientY: e.clientY,
       });
     },
-    [activeTool, onAnnotationAdd, getDocPosition]
+    [activeTool, onAnnotationAdd]
   );
 
   const handleMouseDown = useCallback(
     (e) => {
       if (activeTool !== "highlight" && activeTool !== "approve") return;
-      const { x, y, viewportHeight } = getDocPosition(e);
-      setDragging({ startX: x, startY: y, currentX: x, currentY: y, viewportHeight, clientX: e.clientX, clientY: e.clientY });
+
+      const rect = overlayRef.current.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * 100;
+      const y = ((e.clientY - rect.top) / rect.height) * 100;
+
+      setDragging({ startX: x, startY: y, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY });
     },
-    [activeTool, getDocPosition]
+    [activeTool]
   );
 
   const handleMouseMove = useCallback(
     (e) => {
       if (!dragging) return;
-      const { x, y } = getDocPosition(e);
+
+      const rect = overlayRef.current.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * 100;
+      const y = ((e.clientY - rect.top) / rect.height) * 100;
+
       setDragging((prev) => ({ ...prev, currentX: x, currentY: y, clientX: e.clientX, clientY: e.clientY }));
     },
-    [dragging, getDocPosition]
+    [dragging]
   );
 
   const handleMouseUp = useCallback(() => {
     if (!dragging) return;
 
-    const widthPct = Math.abs(dragging.currentX - dragging.startX);
-    const heightPx = Math.abs(dragging.currentY - dragging.startY);
+    const width = Math.abs(dragging.currentX - dragging.startX);
+    const height = Math.abs(dragging.currentY - dragging.startY);
 
-    if (widthPct > 1 && heightPx > 5) {
+    if (width > 1 && height > 1) {
       onAnnotationAdd({
         type: activeTool,
         position: {
           x: Math.min(dragging.startX, dragging.currentX),
           y: Math.min(dragging.startY, dragging.currentY),
-          width: widthPct,
-          height: heightPx,
-          viewportHeight: dragging.viewportHeight,
+          width,
+          height,
         },
         clientX: dragging.clientX,
         clientY: dragging.clientY,
@@ -270,42 +228,6 @@ export default function WebsitePreview({
     const idx = annotations.findIndex((a) => a.id === annotation.id);
     return idx + 1;
   };
-
-  /**
-   * Convert stored document-relative position back to viewport-relative
-   * for rendering. If the pin is off-screen, it won't show (which is correct).
-   */
-  const getPinStyle = useCallback((pos) => {
-    if (!pos || !overlayRef.current) return { display: "none" };
-    const rect = overlayRef.current.getBoundingClientRect();
-    const vh = rect.height;
-
-    // Y: stored as page-absolute pixels. Subtract current scroll to get viewport position.
-    const yViewport = pos.y - iframeScroll.y;
-    const topPct = (yViewport / vh) * 100;
-
-    return {
-      left: `${pos.x}%`,
-      top: `${topPct}%`,
-    };
-  }, [iframeScroll]);
-
-  const getRectStyle = useCallback((pos) => {
-    if (!pos || !overlayRef.current) return { display: "none" };
-    const rect = overlayRef.current.getBoundingClientRect();
-    const vh = rect.height;
-
-    const yViewport = pos.y - iframeScroll.y;
-    const topPct = (yViewport / vh) * 100;
-    const heightPct = (pos.height / vh) * 100;
-
-    return {
-      left: `${pos.x}%`,
-      top: `${topPct}%`,
-      width: `${pos.width}%`,
-      height: `${heightPct}%`,
-    };
-  }, [iframeScroll]);
 
   const renderTooltip = (a) => {
     if (hoveredPin !== a.id) return null;
@@ -321,24 +243,6 @@ export default function WebsitePreview({
       </div>
     );
   };
-
-  // When activeCommentId changes, try to scroll iframe to that annotation
-  useEffect(() => {
-    if (!activeCommentId) return;
-    const annotation = annotations.find((a) => a.id === activeCommentId);
-    if (!annotation?.position) return;
-    try {
-      const iframe = iframeRef.current;
-      if (iframe && iframe.contentWindow) {
-        iframe.contentWindow.scrollTo({
-          top: Math.max(0, annotation.position.y - 200),
-          behavior: "smooth",
-        });
-      }
-    } catch {
-      // Cross-origin: can't scroll iframe
-    }
-  }, [activeCommentId, annotations]);
 
   return (
     <div className="preview-panel">
@@ -370,7 +274,6 @@ export default function WebsitePreview({
           style={{ transform: `scale(${zoom / 100})`, transformOrigin: "top left", width: `${10000 / zoom}%`, height: `${10000 / zoom}%` }}
         >
           <iframe
-            ref={iframeRef}
             src={url}
             className="preview-iframe"
             title="Website preview"
@@ -390,12 +293,16 @@ export default function WebsitePreview({
             {/* Render annotations */}
             {annotations.map((a) => {
               if (a.position?.width && a.position?.height) {
-                const style = getRectStyle(a.position);
                 return (
                   <div
                     key={a.id}
                     className={`annotation-rect annotation-rect--${a.type}`}
-                    style={style}
+                    style={{
+                      left: `${a.position.x}%`,
+                      top: `${a.position.y}%`,
+                      width: `${a.position.width}%`,
+                      height: `${a.position.height}%`,
+                    }}
                     onMouseEnter={() => handlePinEnter(a.id)}
                     onMouseLeave={handlePinLeave}
                     onClick={(e) => {
@@ -408,12 +315,14 @@ export default function WebsitePreview({
                 );
               }
 
-              const style = getPinStyle(a.position);
               return (
                 <div
                   key={a.id}
                   className={`annotation-pin annotation-pin--${a.type}${activeCommentId === a.id ? " active" : ""}`}
-                  style={style}
+                  style={{
+                    left: `${a.position?.x || 0}%`,
+                    top: `${a.position?.y || 0}%`,
+                  }}
                   onMouseEnter={() => handlePinEnter(a.id)}
                   onMouseLeave={handlePinLeave}
                   onClick={(e) => {
@@ -428,24 +337,18 @@ export default function WebsitePreview({
             })}
 
             {/* Drag preview rectangle */}
-            {dragging && (() => {
-              const rect = overlayRef.current?.getBoundingClientRect();
-              const vh = rect?.height || 1;
-              const yViewport = dragging.currentY - iframeScroll.y;
-              const startYViewport = dragging.startY - iframeScroll.y;
-              return (
-                <div
-                  className={`annotation-rect annotation-rect--${activeTool}`}
-                  style={{
-                    left: `${Math.min(dragging.startX, dragging.currentX)}%`,
-                    top: `${(Math.min(startYViewport, yViewport) / vh) * 100}%`,
-                    width: `${Math.abs(dragging.currentX - dragging.startX)}%`,
-                    height: `${(Math.abs(dragging.currentY - dragging.startY) / vh) * 100}%`,
-                    opacity: 0.6,
-                  }}
-                />
-              );
-            })()}
+            {dragging && (
+              <div
+                className={`annotation-rect annotation-rect--${activeTool}`}
+                style={{
+                  left: `${Math.min(dragging.startX, dragging.currentX)}%`,
+                  top: `${Math.min(dragging.startY, dragging.currentY)}%`,
+                  width: `${Math.abs(dragging.currentX - dragging.startX)}%`,
+                  height: `${Math.abs(dragging.currentY - dragging.startY)}%`,
+                  opacity: 0.6,
+                }}
+              />
+            )}
           </div>
         </div>
       )}
