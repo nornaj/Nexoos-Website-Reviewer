@@ -192,11 +192,61 @@ function stripFrameworkScripts(html) {
   return html;
 }
 
+// Rewrite image/media URLs from the target domain to use our asset proxy
+function proxyAssetUrls(html, targetOrigin) {
+  const hostname = new URL(targetOrigin).hostname;
+  
+  // Rewrite img src, source srcset, video/audio src, poster
+  // Match absolute URLs from the target domain in src/poster attributes
+  html = html.replace(
+    /((?:src|poster)\s*=\s*["'])(https?:\/\/[^"']*)/gi,
+    (match, prefix, url) => {
+      if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif|mp4|webm|mp3|woff2?|ttf|eot)/i.test(url)) {
+        return `${prefix}/api/asset?url=${encodeURIComponent(url)}`;
+      }
+      return match;
+    }
+  );
+  
+  // Rewrite srcset values
+  html = html.replace(
+    /srcset\s*=\s*"([^"]*)"/gi,
+    (match, srcset) => {
+      const rewritten = srcset.replace(
+        /(https?:\/\/[^\s,]+)/g,
+        (url) => {
+          if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif)/i.test(url)) {
+            return `/api/asset?url=${encodeURIComponent(url)}`;
+          }
+          return url;
+        }
+      );
+      return `srcset="${rewritten}"`;
+    }
+  );
+  
+  // Rewrite CSS background-image url() in inline styles
+  html = html.replace(
+    /url\(\s*['"]?(https?:\/\/[^'")\s]+)['"]?\s*\)/gi,
+    (match, url) => {
+      if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif)/i.test(url)) {
+        return `url(/api/asset?url=${encodeURIComponent(url)})`;
+      }
+      return match;
+    }
+  );
+  
+  return html;
+}
+
 // Inject Nexoos scripts into the HTML
 function injectScripts(html, targetUrl, wasBrowserRendered = false) {
   if (wasBrowserRendered) {
     html = stripFrameworkScripts(html);
   }
+  
+  // Proxy image/media URLs through our asset endpoint
+  html = proxyAssetUrls(html, targetUrl.origin);
 
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
 
