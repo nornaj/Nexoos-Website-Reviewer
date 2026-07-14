@@ -1,58 +1,90 @@
+import chromium from "@sparticuz/chromium";
+import puppeteer from "puppeteer-core";
 import { NextResponse } from "next/server";
+import fs from "fs";
 
-export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const url = searchParams.get("url");
+// Vercel serverless config — Puppeteer needs more time
+export const maxDuration = 30;
 
-  if (!url) {
-    return NextResponse.json({ error: "Missing url parameter" }, { status: 400 });
+// Find a locally installed Chrome for development
+function getLocalChromePath() {
+  const paths = [
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    process.env.LOCALAPPDATA + "\\Google\\Chrome\\Application\\chrome.exe",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium-browser",
+  ];
+  for (const p of paths) {
+    try {
+      if (p && fs.existsSync(p)) return p;
+    } catch {}
+  }
+  return null;
+}
+
+// Try fetching with a headless browser (bypasses WAF/Cloudflare)
+async function fetchWithBrowser(url) {
+  const isDev = process.env.NODE_ENV === "development";
+  let executablePath;
+  let args;
+
+  if (isDev) {
+    executablePath = getLocalChromePath();
+    if (!executablePath) throw new Error("No local Chrome found");
+    args = [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+    ];
+  } else {
+    executablePath = await chromium.executablePath();
+    args = chromium.args;
   }
 
+  const browser = await puppeteer.launch({
+    headless: isDev ? "new" : chromium.headless,
+    executablePath,
+    args,
+    defaultViewport: { width: 1280, height: 900 },
+  });
+
   try {
-    const targetUrl = new URL(url);
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 20000 });
 
-    // Fetch the website
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-      redirect: "follow",
-    });
+    // Small delay for JS-rendered content
+    await new Promise((r) => setTimeout(r, 500));
 
-    // Read the body regardless of status code — many staging/protected sites
-    // (e.g. SiteGround) return 401/403 but still include the full HTML content
-    let html = await res.text();
+    const html = await page.content();
+    await browser.close();
+    return html;
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
+}
 
-    if (!html || html.trim().length === 0) {
-      // Empty body usually means WAF/Cloudflare JS challenge — tell frontend
-      // to fall back to loading the URL directly in the iframe
-      return NextResponse.json(
-        { fallback: "direct", reason: `Site returned empty response (HTTP ${res.status}). It may be behind a firewall that requires a real browser.`, url },
-        { status: 200 }
-      );
-    }
+// Inject Nexoos scripts into the HTML
+function injectScripts(html, targetUrl) {
+  // Inject URL override at the VERY START of the document
+  const urlFix = `<script data-nexoos="url-fix">history.replaceState(null,'','${targetUrl.pathname}${targetUrl.search || ''}');` +
+    `Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});</script>`;
 
-    // Inject URL override at the VERY START of the document — before DOCTYPE, before any framework code
-    // This fakes window.location.pathname so SPA routers see the correct route
-    const urlFix = `<script data-nexoos="url-fix">history.replaceState(null,'','${targetUrl.pathname}${targetUrl.search || ''}');` +
-      `Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});</script>`;
+  html = urlFix + html;
 
-    // Prepend before everything
-    html = urlFix + html;
+  // Insert <base> tag so all relative URLs resolve correctly
+  const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
+  if (/<head/i.test(html)) {
+    html = html.replace(/<head([^>]*)>/i, `<head$1><base href="${baseHref}">`);
+  } else {
+    html = `<base href="${baseHref}">` + html;
+  }
 
-    // Insert <base> tag so all relative URLs resolve correctly
-    const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`; 
-    if (/<head/i.test(html)) {
-      html = html.replace(/<head([^>]*)>/i, `<head$1><base href="${baseHref}">`);
-    } else {
-      html = `<base href="${baseHref}">` + html;
-    }
-
-    // Inject scroll-tracking script + link interception
-    const injectedScript = `
+  // Inject scroll-tracking script + link interception
+  const injectedScript = `
 <script data-nexoos="true">
 (function() {
   // Send scroll position to parent
@@ -104,16 +136,52 @@ export async function GET(request) {
 })();
 </script>`;
 
-    if (/<\/body>/i.test(html)) {
-      html = html.replace(/<\/body>/i, injectedScript + "</body>");
-    } else {
-      html += injectedScript;
+  if (/<\/body>/i.test(html)) {
+    html = html.replace(/<\/body>/i, injectedScript + "</body>");
+  } else {
+    html += injectedScript;
+  }
+
+  return html;
+}
+
+export async function GET(request) {
+  const { searchParams } = new URL(request.url);
+  const url = searchParams.get("url");
+
+  if (!url) {
+    return NextResponse.json({ error: "Missing url parameter" }, { status: 400 });
+  }
+
+  try {
+    const targetUrl = new URL(url);
+
+    // Step 1: Try a fast fetch() first
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      redirect: "follow",
+    });
+
+    let html = await res.text();
+
+    // Step 2: If fetch returned empty/blocked, use Puppeteer as fallback
+    if (!html || html.trim().length === 0) {
+      console.log(`[proxy] Simple fetch failed for ${url} (HTTP ${res.status}), falling back to Puppeteer`);
+      html = await fetchWithBrowser(url);
     }
+
+    // Step 3: Inject our scripts and return
+    html = injectScripts(html, targetUrl);
 
     return new NextResponse(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "public, max-age=300", // Cache 5 min
+        "Cache-Control": "public, max-age=300",
       },
     });
   } catch (error) {

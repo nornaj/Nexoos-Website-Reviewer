@@ -104,10 +104,6 @@ export default function WebsitePreview({
   const hoverTimeout = useRef(null);
   const didDragRef = useRef(false);
 
-  // Direct mode: when the proxy can't fetch the site (WAF/Cloudflare),
-  // fall back to loading the URL directly in the iframe
-  const [directMode, setDirectMode] = useState(false);
-
   // Scroll state from the proxied iframe
   const [iframeScroll, setIframeScroll] = useState({ x: 0, y: 0, scrollHeight: 0, clientHeight: 0 });
   const iframeScrollRef = useRef({ x: 0, y: 0, scrollHeight: 0, clientHeight: 0 });
@@ -120,37 +116,6 @@ export default function WebsitePreview({
 
   // The proxied URL
   const proxyUrl = url ? `/api/proxy?url=${encodeURIComponent(url)}` : "";
-
-  // Pre-check: try the proxy first; if it signals fallback, switch to direct mode
-  useEffect(() => {
-    if (!url) return;
-    let cancelled = false;
-
-    async function checkProxy() {
-      try {
-        const res = await fetch(`/api/proxy?url=${encodeURIComponent(url)}`);
-        const contentType = res.headers.get("content-type") || "";
-
-        // If the proxy returned JSON instead of HTML, it means it couldn't fetch the site
-        if (contentType.includes("application/json")) {
-          const json = await res.json();
-          if (json.fallback === "direct" && !cancelled) {
-            setDirectMode(true);
-          }
-        }
-      } catch {
-        // If proxy fails entirely, try direct mode
-        if (!cancelled) setDirectMode(true);
-      }
-    }
-
-    setDirectMode(false);
-    checkProxy();
-    return () => { cancelled = true; };
-  }, [url]);
-
-  // The actual URL the iframe will load
-  const iframeSrc = directMode ? url : proxyUrl;
 
   // Listen for scroll messages from the proxied iframe
   useEffect(() => {
@@ -385,12 +350,6 @@ export default function WebsitePreview({
         </div>
       )}
 
-      {directMode && !loading && (
-        <div className="preview-direct-banner">
-          ⚡ Direct mode — this site blocked proxy access. Annotations on scroll position may be less accurate.
-        </div>
-      )}
-
       <div
         className="preview-iframe-wrap"
         style={{
@@ -402,7 +361,7 @@ export default function WebsitePreview({
       >
         <iframe
           ref={iframeRef}
-          src={iframeSrc}
+          src={proxyUrl}
           className="preview-iframe"
           title="Website preview"
           onLoad={() => setLoading(false)}
