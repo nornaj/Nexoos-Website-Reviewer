@@ -316,7 +316,7 @@ export default function WebsitePreview({
       ) : (
         <div
           className="preview-iframe-wrap"
-          style={{ transform: `scale(${zoom / 100})`, transformOrigin: "top left", width: `${10000 / zoom}%`, height: `${10000 / zoom}%` }}
+          style={{ transform: `scale(${zoom / 100})`, transformOrigin: "top left", width: `${10000 / zoom}%` }}
         >
           <iframe
             ref={iframeRef}

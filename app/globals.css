@@ -968,19 +968,21 @@ textarea.input-error:focus {
 .preview-iframe-wrap {
   position: relative;
   width: 100%;
-  height: 100%;
 }
 
 .preview-iframe {
   width: 100%;
-  height: 100%;
+  height: 8000px;
   border: none;
   background: #fff;
 }
 
 .preview-overlay {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
   z-index: 5;
   cursor: crosshair;
 }
