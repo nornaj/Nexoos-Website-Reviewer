@@ -112,7 +112,7 @@ async function quickFetch(url) {
 async function fetchCSS(cssUrl) {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const res = await fetch(cssUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -147,8 +147,9 @@ async function inlineExternalCSS(html, targetOrigin) {
       } else if (cssUrl.startsWith("//")) {
         cssUrl = "https:" + cssUrl;
       }
-      // Only inline CSS from the same domain (skip Google Fonts, CDNs — those load fine cross-origin)
-      if (cssUrl.includes(new URL(targetOrigin).hostname)) {
+      // Inline ALL CSS to bypass cross-origin issues
+      // Skip only Google Fonts CSS API (serves different CSS per user-agent, works cross-origin)
+      if (!cssUrl.includes("fonts.googleapis.com/css")) {
         matches.push({ tag, url: cssUrl });
       }
     }
@@ -550,9 +551,41 @@ export async function GET(request) {
       },
     });
   } catch (error) {
-    return NextResponse.json(
-      { error: "Failed to proxy website", details: error.message },
-      { status: 500 }
-    );
+    console.log(`[proxy] Fatal error for ${url}: ${error.message}`);
+    // User-friendly error messages
+    let title = "Unable to load this website";
+    let message = "Something went wrong while loading the page.";
+    const msg = error.message || "";
+    if (msg.includes("ERR_NAME_NOT_RESOLVED")) {
+      title = "Website not found";
+      message = "This domain doesn't exist or couldn't be resolved. Please check the URL.";
+    } else if (msg.includes("timeout") || msg.includes("Timeout")) {
+      title = "Website took too long to respond";
+      message = "The website didn't respond within the time limit. It may be slow or temporarily unavailable.";
+    } else if (msg.includes("ERR_CONNECTION_REFUSED")) {
+      title = "Connection refused";
+      message = "The website's server refused the connection. It may be down or blocking automated access.";
+    } else if (msg.includes("TIMED_OUT")) {
+      title = "Connection timed out";
+      message = "The website took too long to respond. It may be down or very slow.";
+    } else if (msg.includes("ERR_SSL") || msg.includes("certificate")) {
+      title = "SSL/Security error";
+      message = "There's an issue with the website's security certificate.";
+    }
+    const errorHtml = `<!DOCTYPE html><html><head><title>${title}</title></head>
+<body style="font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0">
+<div style="text-align:center;max-width:500px;padding:40px">
+<div style="font-size:48px;margin-bottom:16px">⚠️</div>
+<h2 style="margin:0 0 12px;color:#fff">${title}</h2>
+<p style="margin:0 0 20px;color:#b0b0b0;line-height:1.5">${message}</p>
+<p style="color:#666;font-size:12px;word-break:break-all">${msg}</p>
+</div></body></html>`;
+    return new NextResponse(errorHtml, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "X-Frame-Options": "ALLOWALL",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+      },
+    });
   }
 }
