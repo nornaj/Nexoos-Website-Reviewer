@@ -36,31 +36,13 @@ function getAvatarColor(name) {
 export default function FolderPage() {
   const { id: folderId } = useParams();
   const { folders } = useFolders();
-  const { projects, loaded, addProject, deleteProject, getProjectsByFolder } = useProjects();
+  const { getProjectsByFolder, deleteProject } = useProjects();
   const { addToast } = useToast();
 
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: "", url: "", reviewerName: "", notes: "" });
   const [deleteModal, setDeleteModal] = useState({ open: false, project: null });
 
   const folder = folders.find((f) => f.id === folderId);
   const pages = getProjectsByFolder(folderId);
-
-  const handleAddPage = async () => {
-    if (!form.url.trim()) return;
-    const page = await addProject({
-      name: form.name.trim() || form.url.trim(),
-      url: form.url.trim().startsWith("http") ? form.url.trim() : `https://${form.url.trim()}`,
-      reviewerName: form.reviewerName.trim(),
-      notes: form.notes.trim(),
-      folderId: folderId,
-    });
-    if (page) {
-      addToast("Page added", "success");
-      setShowForm(false);
-      setForm({ name: "", url: "", reviewerName: "", notes: "" });
-    }
-  };
 
   const handleDelete = (e, project) => {
     e.preventDefault();
@@ -94,66 +76,18 @@ export default function FolderPage() {
           <div className="eyebrow">Project</div>
           <h1>{folder.name}</h1>
         </div>
-        <button className="btn" onClick={() => setShowForm(!showForm)}>
+        <Link href={`/review-form?folder=${folderId}`} className="btn">
           <span className="btn-icon">+</span> Add a Page
-        </button>
+        </Link>
       </div>
 
-      {/* Add page form */}
-      {showForm && (
-        <div className="add-page-form">
-          <div className="field">
-            <label htmlFor="page-name">Page Name</label>
-            <input
-              id="page-name"
-              placeholder="e.g. Homepage, About, Contact"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="page-url">Website URL *</label>
-            <input
-              id="page-url"
-              placeholder="https://example.com"
-              value={form.url}
-              onChange={(e) => setForm({ ...form, url: e.target.value })}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="page-reviewer">Reviewer Name</label>
-            <input
-              id="page-reviewer"
-              placeholder="Who is reviewing this?"
-              value={form.reviewerName}
-              onChange={(e) => setForm({ ...form, reviewerName: e.target.value })}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="page-notes">Notes</label>
-            <textarea
-              id="page-notes"
-              placeholder="Any additional notes…"
-              value={form.notes}
-              onChange={(e) => setForm({ ...form, notes: e.target.value })}
-              rows={3}
-            />
-          </div>
-          <div className="add-page-actions">
-            <button className="btn btn--secondary" onClick={() => setShowForm(false)}>Cancel</button>
-            <button className="btn" onClick={handleAddPage} disabled={!form.url.trim()}>Add Page</button>
-          </div>
-        </div>
-      )}
-
-      {/* Pages list */}
-      {pages.length === 0 && !showForm ? (
+      {pages.length === 0 ? (
         <EmptyState
           icon="📄"
           title="No pages yet"
           description="Add a page to start reviewing."
           ctaText="+ Add a Page"
-          onCtaClick={() => setShowForm(true)}
+          ctaHref={`/review-form?folder=${folderId}`}
         />
       ) : (
         <div className="grid">

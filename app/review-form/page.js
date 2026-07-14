@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { useProjects } from "@/lib/context";
 import { useToast } from "../components/Toast";
 
 export default function ReviewForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const folderId = searchParams.get("folder");
   const { addProject } = useProjects();
   const { addToast } = useToast();
 
@@ -38,7 +40,7 @@ export default function ReviewForm() {
       }
     }
     if (!form.name.trim()) {
-      errs.name = "Project name is required";
+      errs.name = "Page name is required";
     }
     return errs;
   };
@@ -57,13 +59,18 @@ export default function ReviewForm() {
     const newProject = await addProject({
       ...form,
       url,
+      folderId: folderId || null,
     });
 
     if (newProject) {
       addToast(`"${newProject.name}" created`, "success");
-      router.push(`/project/${newProject.id}`);
+      if (folderId) {
+        router.push(`/folder/${folderId}`);
+      } else {
+        router.push(`/project/${newProject.id}`);
+      }
     } else {
-      addToast("Failed to create project", "error");
+      addToast("Failed to create page", "error");
       setSubmitting(false);
     }
   };
@@ -79,13 +86,16 @@ export default function ReviewForm() {
     }
   };
 
+  const backHref = folderId ? `/folder/${folderId}` : "/";
+  const backLabel = folderId ? "Back to project" : "Back to projects";
+
   return (
     <div className="wrap wrap--narrow page-enter">
-      <Link href="/" className="back">
-        <span className="back-arrow">←</span> Back to projects
+      <Link href={backHref} className="back">
+        <span className="back-arrow">←</span> {backLabel}
       </Link>
 
-      <h1 className="form-title">New Project Review</h1>
+      <h1 className="form-title">Add a Page</h1>
       <p className="sub">
         Fill in the details for the website you&apos;re reviewing.
       </p>
@@ -110,10 +120,10 @@ export default function ReviewForm() {
 
       <div className="two-col">
         <div className="field" style={{ marginBottom: 0 }}>
-          <label htmlFor="project-name">Project name *</label>
+          <label htmlFor="project-name">Page name *</label>
           <input
             id="project-name"
-            placeholder="Acme Corp Site"
+            placeholder="Homepage, About, Contact…"
             value={form.name}
             onChange={(e) => updateField("name", e.target.value)}
             className={errors.name ? "input-error" : ""}
@@ -164,7 +174,7 @@ export default function ReviewForm() {
         onClick={handleSubmit}
         disabled={submitting}
       >
-        {submitting ? "Creating…" : "Save Review"}
+        {submitting ? "Creating…" : "Add Page"}
       </button>
     </div>
   );
