@@ -511,13 +511,11 @@ export async function GET(request) {
       usedBrowser = true;
     }
 
-    // Inline external CSS from the target domain to bypass referer-based blocking
-    if (!usedBrowser) {
-      try {
-        html = await inlineExternalCSS(html, targetUrl.origin);
-      } catch (e) {
-        console.log(`[proxy] CSS inlining failed: ${e.message}`);
-      }
+    // Always inline external CSS to bypass cross-origin blocking
+    try {
+      html = await inlineExternalCSS(html, targetUrl.origin);
+    } catch (e) {
+      console.log(`[proxy] CSS inlining failed: ${e.message}`);
     }
 
     // Extract proxy origin from request URL
