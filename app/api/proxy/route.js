@@ -169,10 +169,25 @@ export async function GET(request) {
 
     let html = await res.text();
 
-    // Step 2: If fetch returned empty/blocked, use Puppeteer as fallback
-    if (!html || html.trim().length === 0) {
-      console.log(`[proxy] Simple fetch failed for ${url} (HTTP ${res.status}), falling back to Puppeteer`);
-      html = await fetchWithBrowser(url);
+    // Step 2: Fall back to Puppeteer if:
+    //   - HTTP status is NOT 2xx (e.g. 401, 403, 503 — even if there's an error page HTML)
+    //   - OR the body is empty (WAF blocked with no content)
+    // This covers both cases:
+    //   - nexoosgroup.com: 403 + empty body → Puppeteer
+    //   - narekn28.sg-host.com: 403 + error page HTML → Puppeteer
+    const needsBrowser = !res.ok || !html || html.trim().length === 0;
+
+    if (needsBrowser) {
+      console.log(`[proxy] Simple fetch failed for ${url} (HTTP ${res.status}, body: ${html?.length || 0} bytes), falling back to Puppeteer`);
+      try {
+        html = await fetchWithBrowser(url);
+      } catch (browserError) {
+        console.log(`[proxy] Puppeteer also failed for ${url}: ${browserError.message}`);
+        // If Puppeteer failed but simple fetch had some HTML, use it as last resort
+        if (!html || html.trim().length === 0) {
+          throw browserError;
+        }
+      }
     }
 
     // Step 3: Inject our scripts and return
