@@ -56,9 +56,30 @@ async function fetchWithBrowser(url) {
 
   try {
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-    // Brief wait for JS rendering
-    await new Promise((r) => setTimeout(r, 300));
+    // Use networkidle0 to ensure all resources (CSS, JS) are loaded
+    await page.goto(url, { waitUntil: "networkidle0", timeout: 20000 });
+    
+    // Wait for stylesheets to be applied and JS to render
+    await new Promise((r) => setTimeout(r, 1000));
+    
+    // For JS-rendered sites, wait for the body to have real content
+    await page.evaluate(() => {
+      return new Promise((resolve) => {
+        if (document.body && document.body.innerText.length > 100) {
+          return resolve();
+        }
+        // Wait up to 3 more seconds for content to appear
+        let checks = 0;
+        const interval = setInterval(() => {
+          checks++;
+          if ((document.body && document.body.innerText.length > 100) || checks > 6) {
+            clearInterval(interval);
+            resolve();
+          }
+        }, 500);
+      });
+    });
+    
     const html = await page.content();
     await browser.close();
     return html;
@@ -162,6 +183,33 @@ function injectScripts(html, targetUrl) {
 
   return html;
 }
+// Detect if the HTML is a JS-rendered shell that needs a real browser to render
+function needsBrowserRendering(html) {
+  // Count real stylesheet links
+  const stylesheetCount = (html.match(/<link[^>]+rel=["']stylesheet["'][^>]*>/gi) || []).length;
+  // Count style tags with actual CSS (not empty)
+  const styleTagCount = (html.match(/<style[^>]*>[^<]{50,}<\/style>/gi) || []).length;
+  
+  // Check for JS framework shell markers
+  const isNextJS = /self\.__next_f\.push|__NEXT_DATA__|__next/i.test(html);
+  const isReactSPA = /<div\s+id=["'](?:root|app|__next)["'][^>]*>\s*<\/div>/i.test(html);
+  const isNuxt = /__NUXT__|window\.__nuxt/i.test(html);
+  const isRemix = /window\.__remixContext/i.test(html);
+  
+  const isJSFramework = isNextJS || isReactSPA || isNuxt || isRemix;
+  
+  // If it's a JS framework with very few stylesheets, it needs browser rendering
+  if (isJSFramework && stylesheetCount <= 2 && styleTagCount <= 1) {
+    return true;
+  }
+  
+  // If there's almost no CSS at all, something is wrong
+  if (stylesheetCount === 0 && styleTagCount === 0) {
+    return true;
+  }
+  
+  return false;
+}
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -178,14 +226,27 @@ export async function GET(request) {
     const result = await quickFetch(url);
 
     let html;
+    let usedBrowser = false;
 
     if (result.ok && result.html && result.html.trim().length > 0) {
-      // Fast path — simple fetch succeeded
       html = result.html;
+
+      // Step 2: Check if the HTML is a JS-rendered shell (needs full browser)
+      if (needsBrowserRendering(html)) {
+        console.log(`[proxy] JS-rendered site detected for ${url}, using Puppeteer for full render`);
+        try {
+          html = await fetchWithBrowser(url);
+          usedBrowser = true;
+        } catch (browserError) {
+          console.log(`[proxy] Puppeteer failed for JS render: ${browserError.message}, using fetch HTML`);
+          // Fall back to the simple fetch HTML — better than nothing
+        }
+      }
     } else {
-      // Step 2: Fetch failed — use Puppeteer headless browser
+      // Step 2b: Fetch failed (non-2xx or empty) — use Puppeteer
       console.log(`[proxy] Quick fetch failed for ${url} (HTTP ${result.status}), using Puppeteer`);
       html = await fetchWithBrowser(url);
+      usedBrowser = true;
     }
 
     // Step 3: Inject scripts and return
