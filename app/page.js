@@ -47,7 +47,7 @@ function FolderCard({ folder, onDelete, onRename }) {
   const colors = getAvatarColor(folder.name);
 
   return (
-    <div className="folder-card">
+    <Link href={`/folder/${folder.id}`} className="folder-card">
       <button
         className="card-delete"
         onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(folder); }}
@@ -59,14 +59,9 @@ function FolderCard({ folder, onDelete, onRename }) {
         </svg>
       </button>
 
-      <Link href={`/folder/${folder.id}`} className="folder-card-link">
-        <div
-          className="folder-card-avatar"
-          style={{ background: `linear-gradient(135deg, ${colors[0]}, ${colors[1]})` }}
-        >
-          <span className="folder-card-letter">{folder.name.charAt(0).toUpperCase()}</span>
-        </div>
-      </Link>
+      <div className="folder-card-avatar">
+        <span className="folder-card-letter">{folder.name.charAt(0).toUpperCase()}</span>
+      </div>
 
       {editing ? (
         <input
@@ -75,6 +70,7 @@ function FolderCard({ folder, onDelete, onRename }) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           onBlur={handleRename}
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
           onKeyDown={(e) => {
             if (e.key === "Enter") handleRename();
             if (e.key === "Escape") { setName(folder.name); setEditing(false); }
@@ -83,13 +79,13 @@ function FolderCard({ folder, onDelete, onRename }) {
       ) : (
         <div
           className="folder-card-name"
-          onDoubleClick={() => setEditing(true)}
+          onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); setEditing(true); }}
           title="Double-click to rename"
         >
           {folder.name}
         </div>
       )}
-    </div>
+    </Link>
   );
 }
 
