@@ -264,6 +264,20 @@ async function fetchWithBrowser(url) {
     // Convert images to inline data URIs from within the browser
     // (the browser has the SiteGround cookies, so it can fetch assets)
     console.log(`[proxy] Converting images to inline data URIs for ${url}...`);
+
+    // Trigger lazy-loaded images by scrolling through the page
+    await page.evaluate(async () => {
+      const step = Math.max(window.innerHeight, 500);
+      const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+      for (let y = 0; y < max; y += step) {
+        window.scrollTo(0, y);
+        await new Promise(r => setTimeout(r, 200));
+      }
+      window.scrollTo(0, 0);
+    });
+    // Wait for lazy images to start loading
+    await new Promise(r => setTimeout(r, 1500));
+
     await page.evaluate(async () => {
       // Cache: url -> dataUri (avoids re-fetching the same URL)
       const cache = new Map();
@@ -349,7 +363,7 @@ async function fetchWithBrowser(url) {
       });
 
       // 5. Convert computed CSS background images (catches class-based backgrounds)
-      const allEls = Array.from(document.querySelectorAll('div, section, article, header, footer, figure, span, a, li'));
+      const allEls = Array.from(document.querySelectorAll('div, section, article, header, footer, figure, span, a, li, main, aside, nav, picture, p'));
       const bgItems = [];
       for (const el of allEls) {
         try {
@@ -360,12 +374,16 @@ async function fetchWithBrowser(url) {
         } catch {}
       }
       await processBatch(bgItems, async ({ el, bg }) => {
-        const urlRegex = /url\(\s*['"]?(https?:\/\/[^'"\)\s]+)['"]?\s*\)/gi;
+        // Match ANY url() — computed styles always return absolute URLs
+        const urlRegex = /url\(\s*["']?((?:https?:\/\/|\/\/)[^"'\)\s]+)["']?\s*\)/gi;
         let newBg = bg;
         let changed = false;
         let match;
         while ((match = urlRegex.exec(bg)) !== null) {
-          const dataUri = await fetchAsDataUri(match[1]);
+          let imgUrl = match[1];
+          // Protocol-relative URLs
+          if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
+          const dataUri = await fetchAsDataUri(imgUrl);
           if (dataUri) {
             newBg = newBg.replace(match[0], `url(${dataUri})`);
             changed = true;
