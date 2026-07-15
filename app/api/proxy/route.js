@@ -578,6 +578,15 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
       position: static !important;
       height: auto !important;
     }
+    /* Hide scrollbars in mobile mode (still scrollable) */
+    html, body, * {
+      scrollbar-width: none !important;
+    }
+    ::-webkit-scrollbar {
+      display: none !important;
+      width: 0 !important;
+      height: 0 !important;
+    }
   </style>`;
 
   // Everything goes INSIDE <head> to preserve <!DOCTYPE> (prevents quirks mode)

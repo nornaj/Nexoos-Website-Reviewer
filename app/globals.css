@@ -1028,11 +1028,11 @@ textarea.input-error:focus {
 
 .mobile-device-notch {
   position: absolute;
-  top: 8px;
+  top: 0;
   left: 50%;
   transform: translateX(-50%);
   width: 120px;
-  height: 24px;
+  height: 28px;
   background: oklch(0.25 0.01 90);
   border-radius: 0 0 16px 16px;
   z-index: 5;
@@ -1043,6 +1043,18 @@ textarea.input-error:focus {
   height: 100%;
   overflow: auto;
   position: relative;
+  /* Hide scrollbars but keep scrollable */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+.preview-iframe-wrap--mobile::-webkit-scrollbar {
+  display: none; /* Chrome/Safari */
+}
+
+/* Hide scrollbars inside the mobile iframe */
+.preview-panel--mobile .preview-iframe {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
 .preview-loading {
