@@ -25,6 +25,35 @@ export async function GET(request) {
     }
 
     const contentType = res.headers.get("content-type") || "application/octet-stream";
+    const isCSS = contentType.includes("text/css") || url.endsWith(".css");
+
+    if (isCSS) {
+      // For CSS files, rewrite relative url() references to absolute URLs
+      // so fonts, images, and other assets still load correctly
+      let css = await res.text();
+      const cssDir = url.substring(0, url.lastIndexOf("/") + 1);
+
+      // Fix root-relative URLs: url(/path/...) → url(https://origin/path/...)
+      css = css.replace(
+        /url\(\s*['"]?(?!data:|http|\/\/)(\/[^'")\s]+)['"]?\s*\)/gi,
+        `url(${targetUrl.origin}$1)`
+      );
+      // Fix relative URLs: url(../path/...) → url(https://origin/full/path/...)
+      css = css.replace(
+        /url\(\s*['"]?(?!data:|http|\/\/|\/)([^'")\s]+)['"]?\s*\)/gi,
+        (match, path) => `url(${cssDir}${path})`
+      );
+
+      return new NextResponse(css, {
+        headers: {
+          "Content-Type": "text/css; charset=utf-8",
+          "Cache-Control": "public, max-age=86400",
+          "Access-Control-Allow-Origin": "*",
+          "Cross-Origin-Resource-Policy": "cross-origin",
+        },
+      });
+    }
+
     const buffer = await res.arrayBuffer();
 
     return new NextResponse(buffer, {

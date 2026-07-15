@@ -108,29 +108,34 @@ async function quickFetch(url) {
   }
 }
 
-// Fetch a single CSS file and return its content
+// Fetch a single CSS file and return its content (with retry)
 async function fetchCSS(cssUrl) {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(cssUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/css,*/*;q=0.1",
-        "Referer": new URL(cssUrl).origin + "/",
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (res.ok) {
-      return await res.text();
-    }
-  } catch {}
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(cssUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/css,*/*;q=0.1",
+          "Referer": new URL(cssUrl).origin + "/",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        return await res.text();
+      }
+    } catch {}
+    // Brief delay before retry
+    if (attempt === 0) await new Promise(r => setTimeout(r, 500));
+  }
   return null;
 }
 
 // Inline external CSS into the HTML to avoid cross-origin referer issues
-async function inlineExternalCSS(html, targetOrigin) {
+// If inlining fails, rewrite <link> tags to use the asset proxy as fallback
+async function inlineExternalCSS(html, targetOrigin, proxyOrigin) {
   // Find all <link rel="stylesheet" href="..."> tags
   const linkRegex = /<link([^>]*rel=["']stylesheet["'][^>]*)>/gi;
   const matches = [];
@@ -162,10 +167,12 @@ async function inlineExternalCSS(html, targetOrigin) {
   });
   
   const results = await Promise.all(cssPromises);
+  const assetBase = proxyOrigin ? `${proxyOrigin}/api/asset?url=` : null;
   
-  // Replace <link> tags with inline <style> tags
+  // Replace <link> tags with inline <style> tags, or proxy through asset endpoint
   for (const r of results) {
     if (r.css) {
+      // Successfully fetched — inline the CSS
       // Fix relative url() references in CSS to be absolute
       let fixedCSS = r.css.replace(
         /url\(\s*['"]?(?!data:|http|\/\/)(\/[^'")]+)['"]?\s*\)/gi,
@@ -179,6 +186,11 @@ async function inlineExternalCSS(html, targetOrigin) {
         }
       );
       html = html.replace(r.tag, `<style data-nexoos-inlined="${r.url}">${fixedCSS}</style>`);
+    } else if (assetBase && r.url.startsWith('http')) {
+      // CSS fetch failed — rewrite <link> to go through our asset proxy
+      const proxiedHref = assetBase + encodeURIComponent(r.url);
+      html = html.replace(r.tag, r.tag.replace(/href=["'][^"']+["']/i, `href="${proxiedHref}"`));
+      console.log(`[proxy] CSS inline failed, proxying: ${r.url}`);
     }
   }
 
@@ -526,16 +538,17 @@ export async function GET(request) {
       }
     }
 
+    // Extract proxy origin from request URL (needed for CSS and asset proxying)
+    const reqUrl = new URL(request.url);
+    const proxyOrigin = reqUrl.origin;
+
     // Always inline external CSS to bypass cross-origin blocking
+    // Falls back to proxying CSS through asset endpoint if inlining fails
     try {
-      html = await inlineExternalCSS(html, targetUrl.origin);
+      html = await inlineExternalCSS(html, targetUrl.origin, proxyOrigin);
     } catch (e) {
       console.log(`[proxy] CSS inlining failed: ${e.message}`);
     }
-
-    // Extract proxy origin from request URL
-    const reqUrl = new URL(request.url);
-    const proxyOrigin = reqUrl.origin;
 
     // Inject Nexoos scripts
     html = injectScripts(html, targetUrl, usedBrowser, proxyOrigin);
