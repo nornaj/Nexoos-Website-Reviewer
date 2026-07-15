@@ -264,6 +264,17 @@ export default function WebsitePreview({
     return (viewportY / overlayHeight) * 100;
   };
 
+  // Forward scroll events from overlay to iframe
+  const handleOverlayWheel = (e) => {
+    if (!iframeRef.current) return;
+    try {
+      iframeRef.current.contentWindow.postMessage(
+        { type: 'nexoos-scrollTo', top: iframeScrollRef.current.y + e.deltaY },
+        '*'
+      );
+    } catch {}
+  };
+
   const renderOverlay = () => {
     const overlayHeight = overlayRef.current?.getBoundingClientRect().height || 1;
 
@@ -275,6 +286,7 @@ export default function WebsitePreview({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
+        onWheel={handleOverlayWheel}
       >
         {annotations.map((a) => {
           const pos = a.position;
@@ -355,7 +367,6 @@ export default function WebsitePreview({
 
       {isMobile ? (
         <div className="mobile-device-frame">
-          <div className="mobile-device-notch" />
           <div
             className="preview-iframe-wrap preview-iframe-wrap--mobile"
             style={{
