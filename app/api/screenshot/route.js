@@ -4,7 +4,10 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
-const CACHE_DIR = path.join(process.cwd(), ".next", "cache", "screenshots");
+// Use /tmp on Vercel (serverless filesystem is read-only except /tmp)
+const CACHE_DIR = process.env.VERCEL
+  ? path.join("/tmp", "screenshots")
+  : path.join(process.cwd(), ".next", "cache", "screenshots");
 
 function getCachePath(url, fullPage) {
   const key = fullPage ? `${url}__fullpage` : url;
@@ -103,6 +106,7 @@ export async function GET(request) {
     }
 
     const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
     await page.goto(url, { waitUntil: "networkidle2", timeout: 20000 });
 
     // Small delay for animations/lazy images
@@ -121,8 +125,10 @@ export async function GET(request) {
 
     await browser.close().catch(() => {});
 
-    // Cache the screenshot
-    fs.writeFileSync(cachePath, screenshot);
+    // Cache the screenshot (non-fatal if write fails)
+    try {
+      fs.writeFileSync(cachePath, screenshot);
+    } catch {}
 
     return new NextResponse(screenshot, {
       headers: {
