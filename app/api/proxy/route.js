@@ -163,6 +163,103 @@ async function fetchWithBrowser(url) {
       }
     });
 
+    // Dismiss popups, modals, overlays, cookie banners before extracting HTML
+    console.log(`[proxy] Dismissing popups/overlays for ${url}...`);
+    await page.evaluate(() => {
+      // Common popup/modal/overlay selectors
+      const popupSelectors = [
+        // Cookie consent
+        '.cookie-banner', '.cookie-notice', '.cookie-consent', '#cookie-notice',
+        '#cookie-banner', '.cookies-popup', '[class*="cookie"]',
+        '#CybotCookiebotDialog', '.cc-window', '.cc-banner',
+        '#gdpr-consent', '.gdpr-banner', '[class*="gdpr"]',
+        '#onetrust-banner-sdk', '#onetrust-consent-sdk',
+        '.qc-cmp-showing', '#qcCmpButtons',
+        // Newsletter / signup popups
+        '.newsletter-popup', '.popup-overlay', '.email-popup',
+        '[class*="newsletter-popup"]', '[class*="popup-modal"]',
+        // Generic modals/overlays  
+        '.modal-overlay', '.modal-backdrop', '.modal.show',
+        '.overlay', '.popup', '.lightbox-overlay',
+        '[class*="modal-overlay"]', '[class*="popup-overlay"]',
+        // WordPress specific popup plugins
+        '.pum-overlay', '.pum-container', // Popup Maker
+        '.sgpb-popup-overlay', '.sgpb-popup-dialog-main-div', // Popup Builder
+        '.hustle-popup-overlay', '.hustle-popup', // Hustle
+        '.optinmonster-overlay', '#om-holder', // OptinMonster
+        '.elementor-popup-modal', // Elementor popups
+        '#elementor-popup-modal', '.dialog-widget',
+        '.elementor-location-popup',
+        // Notification bars
+        '.notification-bar', '.announcement-bar', '.top-bar-notice',
+        // Chat widgets
+        '.crisp-client', '#hubspot-messages-iframe-container',
+        '#tidio-chat', '.intercom-lightweight-app',
+      ];
+
+      // Close button selectors — try clicking them first
+      const closeSelectors = [
+        '.close-popup', '.popup-close', '.modal-close',
+        '.cookie-close', '.banner-close',
+        '[class*="close"]', '[aria-label="Close"]', '[aria-label="close"]',
+        '.pum-close', '.sgpb-popup-close-button',
+        'button.close', '.btn-close',
+      ];
+
+      // Try clicking close buttons inside popups
+      for (const sel of closeSelectors) {
+        try {
+          const buttons = document.querySelectorAll(sel);
+          buttons.forEach(btn => {
+            try { btn.click(); } catch {}
+          });
+        } catch {}
+      }
+
+      // Remove popup/overlay elements
+      for (const sel of popupSelectors) {
+        try {
+          const els = document.querySelectorAll(sel);
+          els.forEach(el => el.remove());
+        } catch {}
+      }
+
+      // Remove elements with high z-index that cover the page (likely overlays)
+      const allElements = document.querySelectorAll('*');
+      for (const el of allElements) {
+        try {
+          const style = window.getComputedStyle(el);
+          const zIndex = parseInt(style.zIndex, 10);
+          const position = style.position;
+          const isFixed = position === 'fixed' || position === 'sticky';
+          const isFullScreen = el.offsetWidth > window.innerWidth * 0.8 && 
+                               el.offsetHeight > window.innerHeight * 0.8;
+          const isOverlay = style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)' && 
+                            style.opacity !== '0';
+          
+          // Remove full-screen fixed overlays with high z-index
+          if (isFixed && zIndex > 999 && isFullScreen && isOverlay) {
+            el.remove();
+          }
+          // Remove modal backdrops (semi-transparent full-screen overlays)
+          if (isFixed && isFullScreen && parseFloat(style.opacity) < 0.9 && zIndex > 100) {
+            const bgColor = style.backgroundColor;
+            if (bgColor.includes('rgba') && bgColor.includes('0.')) {
+              el.remove();
+            }
+          }
+        } catch {}
+      }
+
+      // Fix body scroll — popups often set overflow:hidden on body
+      document.body.style.overflow = '';
+      document.body.style.overflowY = '';
+      document.body.style.position = '';
+      document.body.style.height = '';
+      document.documentElement.style.overflow = '';
+      document.documentElement.style.overflowY = '';
+    });
+
     // Convert images to inline data URIs from within the browser
     // (the browser has the SiteGround cookies, so it can fetch assets)
     console.log(`[proxy] Converting images to inline data URIs for ${url}...`);
@@ -453,8 +550,39 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
   
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
 
+  // CSS to hide common popups, overlays, cookie banners, and chat widgets
+  const popupCSS = `<style data-nexoos="popup-hide">
+    /* Cookie consent banners */
+    .cookie-banner, .cookie-notice, .cookie-consent, #cookie-notice, #cookie-banner,
+    .cookies-popup, #CybotCookiebotDialog, .cc-window, .cc-banner,
+    #gdpr-consent, .gdpr-banner, #onetrust-banner-sdk, #onetrust-consent-sdk,
+    .qc-cmp-showing, #qcCmpButtons,
+    /* Popup plugins */
+    .pum-overlay, .pum-container, .sgpb-popup-overlay, .sgpb-popup-dialog-main-div,
+    .hustle-popup-overlay, .hustle-popup, .optinmonster-overlay, #om-holder,
+    .elementor-popup-modal, #elementor-popup-modal, .elementor-location-popup,
+    /* Generic popups/modals/overlays */
+    .modal-overlay, .modal-backdrop, .popup-overlay, .lightbox-overlay,
+    .newsletter-popup, .email-popup,
+    /* Chat widgets */
+    .crisp-client, #hubspot-messages-iframe-container, #tidio-chat,
+    .intercom-lightweight-app, .fb_dialog, #fb-root .fb_dialog {
+      display: none !important;
+      visibility: hidden !important;
+      opacity: 0 !important;
+      pointer-events: none !important;
+    }
+    /* Prevent body scroll lock from popup scripts */
+    html, body {
+      overflow: auto !important;
+      position: static !important;
+      height: auto !important;
+    }
+  </style>`;
+
   // Everything goes INSIDE <head> to preserve <!DOCTYPE> (prevents quirks mode)
   const headInjection = `<base href="${baseHref}">` +
+    popupCSS +
     `<script data-nexoos="url-fix">try{Object.defineProperty(document,'referrer',{get:function(){return '${targetUrl.origin}'}});}catch(e){}</script>`;
 
   if (/<head([^>]*)>/i.test(html)) {
