@@ -56,11 +56,6 @@ async function fetchWithBrowser(url) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
 
-    // Set a realistic user-agent to help bypass bot detection
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
-
     // Use networkidle2 (allows 2 open connections) — networkidle0 is too strict
     // for sites with analytics, websockets, or continuous polling
     await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
@@ -69,31 +64,23 @@ async function fetchWithBrowser(url) {
     // Detect and wait for Cloudflare JS challenge to resolve
     const isCloudflare = await page.evaluate(() => {
       const title = document.title || "";
-      const text = document.body?.textContent || "";
       return (
         title.includes("Just a moment") ||
-        text.includes("Checking the site connection security") ||
-        text.includes("Verifying you are human") ||
-        !!document.querySelector("#challenge-running, #challenge-stage")
+        !!document.querySelector("#challenge-running, #challenge-stage, .cf-challenge-running")
       );
     });
 
     if (isCloudflare) {
-      console.log(`[proxy] Cloudflare challenge detected for ${url}, waiting...`);
+      console.log(`[proxy] Cloudflare challenge detected for ${url}, waiting for navigation...`);
       try {
-        // Wait up to 15 seconds for the challenge to resolve
-        await page.waitForFunction(
-          () => {
-            const title = document.title || "";
-            return (
-              !title.includes("Just a moment") &&
-              !document.querySelector("#challenge-running, #challenge-stage") &&
-              document.body?.innerText?.length > 200
-            );
-          },
-          { timeout: 15000 }
-        );
-        // Extra wait for page to fully render after challenge
+        // Cloudflare resolves via redirect — wait for the navigation
+        await Promise.race([
+          page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }),
+          page.waitForFunction(
+            () => !document.title.includes("Just a moment") && document.body?.innerText?.length > 200,
+            { timeout: 20000 }
+          ),
+        ]);
         await new Promise((r) => setTimeout(r, 2000));
         console.log(`[proxy] Cloudflare challenge resolved for ${url}`);
       } catch {
@@ -308,8 +295,9 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
   
   // 1. Proxy ALL src and poster attributes from the target domain
   // (no file extension requirement — catches all images, videos, fonts)
+  // Use \s before src/poster to avoid matching data-src, data-poster etc.
   html = html.replace(
-    /((?:src|poster)\s*=\s*["'])([^"']+)(["'])/gi,
+    /(\s(?:src|poster)\s*=\s*["'])([^"']+)(["'])/gi,
     (match, prefix, url, suffix) => {
       if (!shouldProxy(url)) return match;
       const proxied = getProxied(url);
