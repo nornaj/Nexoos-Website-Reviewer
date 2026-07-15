@@ -356,6 +356,15 @@ export default function WebsitePreview({
 
   const isMobile = viewMode === "mobile";
 
+  const iframeWrapStyle = isMobile
+    ? { transform: `scale(${zoom / 100})`, transformOrigin: "top center" }
+    : {
+        transform: `scale(${zoom / 100})`,
+        transformOrigin: "top left",
+        width: `${10000 / zoom}%`,
+        height: `${10000 / zoom}%`,
+      };
+
   return (
     <div className={`preview-panel${isMobile ? " preview-panel--mobile" : ""}`}>
       {loading && (
@@ -365,35 +374,10 @@ export default function WebsitePreview({
         </div>
       )}
 
-      {isMobile ? (
-        <div className="mobile-device-frame">
-          <div
-            className="preview-iframe-wrap preview-iframe-wrap--mobile"
-            style={{
-              transform: `scale(${zoom / 100})`,
-              transformOrigin: "top center",
-            }}
-          >
-            <iframe
-              ref={iframeRef}
-              src={proxyUrl}
-              className="preview-iframe"
-              title="Website preview (mobile)"
-              onLoad={() => setLoading(false)}
-              onError={() => setLoading(false)}
-            />
-            {renderOverlay()}
-          </div>
-        </div>
-      ) : (
+      <div className={isMobile ? "mobile-device-frame" : undefined}>
         <div
-          className="preview-iframe-wrap"
-          style={{
-            transform: `scale(${zoom / 100})`,
-            transformOrigin: "top left",
-            width: `${10000 / zoom}%`,
-            height: `${10000 / zoom}%`,
-          }}
+          className={`preview-iframe-wrap${isMobile ? " preview-iframe-wrap--mobile" : ""}`}
+          style={iframeWrapStyle}
         >
           <iframe
             ref={iframeRef}
@@ -405,7 +389,7 @@ export default function WebsitePreview({
           />
           {renderOverlay()}
         </div>
-      )}
+      </div>
     </div>
   );
 }
