@@ -542,6 +542,25 @@ function stripFrameworkScripts(html) {
   return html;
 }
 
+// Known CDN domains used by e-commerce platforms and CMS systems
+const CDN_DOMAINS = [
+  'cdn.shopify.com',
+  'cdn.shopifycdn.net',
+  'images.unsplash.com',
+  'img.clerk.io',
+  'cdn.jsdelivr.net',
+  'cdn.builder.io',
+  'images.contentful.com',
+  'res.cloudinary.com',
+  'cdn.sanity.io',
+  'images.prismic.io',
+  'cdn.bigcommerce.com',
+  'akamaized.net',
+  'cloudfront.net',
+  'imgix.net',
+  'fastly.net',
+];
+
 // Rewrite image/media/font URLs from the target domain to use our asset proxy
 function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
   const hostname = new URL(targetOrigin).hostname;
@@ -549,6 +568,9 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
   
   // Extensions to skip (never proxy scripts/pages)
   const skipPattern = /\.(js|mjs|json|html|htm|php|aspx)(\?|#|$)/i;
+  
+  // Media/image extensions to always proxy regardless of domain
+  const mediaPattern = /\.(png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|ogg|woff2?|ttf|eot|otf)(\?|#|$)/i;
   
   // Resolve relative URL to absolute
   function resolveUrl(url) {
@@ -558,12 +580,29 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
     return null;
   }
   
+  // Check if a URL belongs to a known CDN
+  function isCdnUrl(url) {
+    try {
+      const resolved = resolveUrl(url);
+      if (!resolved) return false;
+      const urlHost = new URL(resolved).hostname;
+      return CDN_DOMAINS.some(cdn => urlHost === cdn || urlHost.endsWith('.' + cdn));
+    } catch { return false; }
+  }
+  
   // Check if URL should be proxied through our asset endpoint
   function shouldProxy(url) {
     if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return false;
     if (skipPattern.test(url)) return false;
     const resolved = resolveUrl(url);
-    return resolved && resolved.includes(hostname);
+    if (!resolved) return false;
+    // Always proxy: same-domain URLs
+    if (resolved.includes(hostname)) return true;
+    // Always proxy: known CDN domains
+    if (isCdnUrl(url)) return true;
+    // Always proxy: URLs with media file extensions (cross-origin images)
+    if (mediaPattern.test(url)) return true;
+    return false;
   }
   
   function getProxied(url) {
@@ -707,6 +746,10 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
 
   // ===== IMAGE PROXY: Permanent catch-all solution =====
   
+  // Known CDN domains to always proxy
+  var CDN_DOMAINS = ['cdn.shopify.com','cdn.shopifycdn.net','images.unsplash.com','cdn.jsdelivr.net','cdn.builder.io','images.contentful.com','res.cloudinary.com','cdn.sanity.io','images.prismic.io','cdn.bigcommerce.com','akamaized.net','cloudfront.net','imgix.net','fastly.net'];
+  var MEDIA_EXT = /\.(png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|woff2?|ttf|eot|otf)(\?|#|$)/i;
+
   // Convert any URL to an absolute URL using the target origin
   function resolveUrl(url) {
     if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return null;
@@ -714,6 +757,29 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
     if (url.startsWith('/')) return TARGET_ORIGIN + url;
     if (url.startsWith('http')) return url;
     return TARGET_ORIGIN + '/' + url;
+  }
+
+  function isCdnUrl(url) {
+    try {
+      var resolved = resolveUrl(url);
+      if (!resolved) return false;
+      var h = new URL(resolved).hostname;
+      for (var i = 0; i < CDN_DOMAINS.length; i++) {
+        if (h === CDN_DOMAINS[i] || h.endsWith('.' + CDN_DOMAINS[i])) return true;
+      }
+    } catch(e) {}
+    return false;
+  }
+
+  function shouldProxyUrl(url) {
+    if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return false;
+    var resolved = resolveUrl(url);
+    if (!resolved) return false;
+    try { var h = new URL(resolved).hostname; } catch(e) { return false; }
+    if (resolved.includes(new URL(TARGET_ORIGIN).hostname)) return true;
+    if (isCdnUrl(url)) return true;
+    if (MEDIA_EXT.test(url)) return true;
+    return false;
   }
 
   // Proxy an image URL through our asset endpoint
@@ -727,7 +793,7 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
   function proxyImage(img) {
     if (img.dataset.nexoosProxied) return;
     var src = img.getAttribute('src');
-    if (src && !src.includes('/api/asset') && !src.startsWith('data:')) {
+    if (src && !src.includes('/api/asset') && !src.startsWith('data:') && shouldProxyUrl(src)) {
       var proxied = proxyUrl(src);
       if (proxied) {
         img.dataset.nexoosProxied = '1';
@@ -772,9 +838,22 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
     if (el.tagName === 'IMG' && !el.dataset.nexoosRetried) {
       el.dataset.nexoosRetried = '1';
       var src = el.getAttribute('src');
-      if (src && !src.includes('/api/asset')) {
+      if (src && !src.includes('/api/asset') && !src.startsWith('data:')) {
+        // On error, always try proxying regardless of domain — the image failed anyway
         var proxied = proxyUrl(src);
         if (proxied) el.setAttribute('src', proxied);
+      }
+    }
+    // Also handle <source> errors inside <picture>
+    if (el.tagName === 'SOURCE' && !el.dataset.nexoosRetried) {
+      el.dataset.nexoosRetried = '1';
+      var srcset = el.getAttribute('srcset');
+      if (srcset && !srcset.includes('/api/asset')) {
+        el.setAttribute('srcset', srcset.replace(/(https?:\/\/[^\s,]+)/g, function(url) {
+          if (url.includes('/api/asset')) return url;
+          var p = proxyUrl(url);
+          return p || url;
+        }));
       }
     }
   }, true);
