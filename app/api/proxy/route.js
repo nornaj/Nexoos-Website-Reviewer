@@ -648,13 +648,9 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
     if (skipPattern.test(url)) return false;
     const resolved = resolveUrl(url);
     if (!resolved) return false;
-    // Always proxy: same-domain URLs
-    if (resolved.includes(hostname)) return true;
-    // Always proxy: known CDN domains
-    if (isCdnUrl(url)) return true;
-    // Always proxy: URLs with media file extensions (cross-origin images)
-    if (mediaPattern.test(url)) return true;
-    return false;
+    // Proxy ALL http(s) URLs — in the iframe context, cross-origin resources
+    // will fail due to different origin, so everything needs proxying
+    return true;
   }
   
   function getProxied(url) {
@@ -826,12 +822,7 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
   function shouldProxyUrl(url) {
     if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return false;
     var resolved = resolveUrl(url);
-    if (!resolved) return false;
-    try { var h = new URL(resolved).hostname; } catch(e) { return false; }
-    if (resolved.includes(new URL(TARGET_ORIGIN).hostname)) return true;
-    if (isCdnUrl(url)) return true;
-    if (MEDIA_EXT.test(url)) return true;
-    return false;
+    return !!resolved;
   }
 
   // Proxy an image URL through our asset endpoint
