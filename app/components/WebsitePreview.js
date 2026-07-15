@@ -96,6 +96,7 @@ export default function WebsitePreview({
   onReply,
   isGuest = false,
   viewMode = "desktop",
+  refreshKey = 0,
 }) {
   const [loading, setLoading] = useState(true);
   const overlayRef = useRef(null);
@@ -115,8 +116,13 @@ export default function WebsitePreview({
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { onAnnotationAddRef.current = onAnnotationAdd; }, [onAnnotationAdd]);
 
-  // The proxied URL
-  const proxyUrl = url ? `/api/proxy?url=${encodeURIComponent(url)}` : "";
+  // The proxied URL (refreshKey busts the cache to force a re-fetch)
+  const proxyUrl = url ? `/api/proxy?url=${encodeURIComponent(url)}${refreshKey ? `&_r=${refreshKey}` : ""}` : "";
+
+  // Re-show loading spinner when refreshKey changes
+  useEffect(() => {
+    if (refreshKey > 0) setLoading(true);
+  }, [refreshKey]);
 
   // Listen for scroll messages from the proxied iframe
   useEffect(() => {

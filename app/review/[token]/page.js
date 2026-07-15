@@ -28,6 +28,7 @@ export default function PublicReviewPage() {
   const [activeCommentId, setActiveCommentId] = useState(null);
   const [guestName, setGuestName] = useState("");
   const [viewMode, setViewMode] = useState("desktop");
+  const [refreshKey, setRefreshKey] = useState(0);
   const [popup, setPopup] = useState({ open: false, type: null, position: null, annotationData: null });
 
   useEffect(() => {
@@ -127,6 +128,11 @@ export default function PublicReviewPage() {
     });
   }, [addToast]);
 
+  const handleRefresh = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+    addToast("Refreshing website…", "info");
+  }, [addToast]);
+
   const handlePinClick = useCallback((commentId) => {
     setActiveCommentId((prev) => (prev === commentId ? null : commentId));
   }, []);
@@ -154,6 +160,7 @@ export default function PublicReviewPage() {
         zoom={zoom}
         onZoomChange={setZoom}
         onShare={handleShare}
+        onRefresh={handleRefresh}
         isGuest
         viewMode={viewMode}
         onViewModeChange={setViewMode}
@@ -173,6 +180,7 @@ export default function PublicReviewPage() {
           onReply={handleReply}
           isGuest
           viewMode={viewMode}
+          refreshKey={refreshKey}
         />
 
         <CommentsSidebar

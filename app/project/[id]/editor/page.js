@@ -30,6 +30,7 @@ export default function EditorPage() {
   const [comments, setComments] = useState([]);
   const [activeCommentId, setActiveCommentId] = useState(null);
   const [viewMode, setViewMode] = useState("desktop");
+  const [refreshKey, setRefreshKey] = useState(0);
   const [popup, setPopup] = useState({ open: false, type: null, position: null, annotationData: null });
 
   // Load comments
@@ -170,6 +171,11 @@ export default function EditorPage() {
     });
   }, [project, addToast]);
 
+  const handleRefresh = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+    addToast("Refreshing website…", "info");
+  }, [addToast]);
+
   const handlePinClick = useCallback((commentId) => {
     setActiveCommentId((prev) => (prev === commentId ? null : commentId));
   }, []);
@@ -195,6 +201,7 @@ export default function EditorPage() {
         zoom={zoom}
         onZoomChange={setZoom}
         onShare={handleShare}
+        onRefresh={handleRefresh}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
       />
@@ -212,6 +219,7 @@ export default function EditorPage() {
           onDelete={handleDelete}
           onReply={handleReply}
           viewMode={viewMode}
+          refreshKey={refreshKey}
         />
 
         <CommentsSidebar
