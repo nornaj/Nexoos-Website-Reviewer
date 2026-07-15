@@ -107,7 +107,30 @@ export async function GET(request) {
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 20000 });
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // Detect security challenges (SiteGround PoW, Cloudflare, etc.)
+    const challengeType = await page.evaluate(() => {
+      const title = (document.title || "").toLowerCase();
+      if (title.includes("robot challenge") || document.querySelector("#powCaptcha")) return "siteground";
+      if (title.includes("just a moment") || document.querySelector("#challenge-running")) return "cloudflare";
+      return null;
+    });
+
+    if (challengeType) {
+      console.log(`[screenshot] Security challenge detected (${challengeType}), waiting...`);
+      try {
+        for (let hop = 0; hop < 3; hop++) {
+          try {
+            await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 });
+          } catch { break; }
+          const t = await page.title();
+          if (!t.toLowerCase().includes("robot challenge") && !t.includes("Just a moment")) break;
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      } catch {}
+    }
 
     // Small delay for animations/lazy images
     await new Promise((r) => setTimeout(r, 800));

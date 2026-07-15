@@ -1,6 +1,7 @@
 import puppeteer from "puppeteer-core";
 import { NextResponse } from "next/server";
 import fs from "fs";
+import { setCookiesForDomain } from "../../../lib/cookie-cache";
 
 // Vercel serverless config
 export const maxDuration = 60;
@@ -61,30 +62,49 @@ async function fetchWithBrowser(url) {
     await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
     await new Promise((r) => setTimeout(r, 1000));
 
-    // Detect and wait for Cloudflare JS challenge to resolve
-    const isCloudflare = await page.evaluate(() => {
-      const title = document.title || "";
-      return (
-        title.includes("Just a moment") ||
-        !!document.querySelector("#challenge-running, #challenge-stage, .cf-challenge-running")
-      );
+    // Detect security challenges: SiteGround PoW, Cloudflare, or generic
+    const challengeType = await page.evaluate(() => {
+      const title = (document.title || "").toLowerCase();
+      // SiteGround: "Robot Challenge Screen", has #powCaptcha, uses sgchallenge variable
+      if (title.includes("robot challenge") || document.querySelector("#powCaptcha") || typeof window.sgchallenge !== "undefined") {
+        return "siteground";
+      }
+      // Cloudflare: "Just a moment", has challenge elements
+      if (title.includes("just a moment") || document.querySelector("#challenge-running, #challenge-stage, .cf-challenge-running")) {
+        return "cloudflare";
+      }
+      // Generic: page has very little content and mentions "checking" or "security"
+      const text = document.body?.textContent || "";
+      if (text.length < 500 && (text.includes("Checking") || text.includes("Verifying"))) {
+        return "generic";
+      }
+      return null;
     });
 
-    if (isCloudflare) {
-      console.log(`[proxy] Cloudflare challenge detected for ${url}, waiting for navigation...`);
+    if (challengeType) {
+      console.log(`[proxy] Security challenge detected (${challengeType}) for ${url}, waiting for redirect...`);
       try {
-        // Cloudflare resolves via redirect — wait for the navigation
-        await Promise.race([
-          page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }),
-          page.waitForFunction(
-            () => !document.title.includes("Just a moment") && document.body?.innerText?.length > 200,
-            { timeout: 20000 }
-          ),
-        ]);
-        await new Promise((r) => setTimeout(r, 2000));
-        console.log(`[proxy] Cloudflare challenge resolved for ${url}`);
-      } catch {
-        console.log(`[proxy] Cloudflare challenge did not resolve for ${url}`);
+        // The challenge solves via Web Workers then redirects (may be 2+ hops)
+        // Wait for navigation chain to complete
+        for (let hop = 0; hop < 3; hop++) {
+          try {
+            await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 });
+          } catch { break; }
+
+          // Check if we've reached the real page
+          const currentUrl = page.url();
+          const currentTitle = await page.title();
+          const isStillChallenge = currentUrl.includes(".well-known") || 
+                                    currentUrl.includes("captcha") ||
+                                    currentTitle.toLowerCase().includes("robot challenge") ||
+                                    currentTitle.includes("Just a moment");
+          if (!isStillChallenge) break;
+        }
+        // Extra wait for the real page to fully render
+        await new Promise((r) => setTimeout(r, 3000));
+        console.log(`[proxy] Security challenge resolved for ${url}, now at: ${page.url()}`);
+      } catch (e) {
+        console.log(`[proxy] Security challenge handling error for ${url}: ${e.message}`);
       }
     }
 
@@ -143,7 +163,74 @@ async function fetchWithBrowser(url) {
       }
     });
 
+    // Convert images to inline data URIs from within the browser
+    // (the browser has the SiteGround cookies, so it can fetch assets)
+    console.log(`[proxy] Converting images to inline data URIs for ${url}...`);
+    await page.evaluate(async () => {
+      async function fetchAsDataUri(url, timeout = 5000) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeout);
+          const res = await fetch(url, { signal: controller.signal });
+          clearTimeout(timer);
+          if (!res.ok) return null;
+          const blob = await res.blob();
+          // Skip very large files (> 2MB)
+          if (blob.size > 2 * 1024 * 1024) return null;
+          return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(blob);
+          });
+        } catch { return null; }
+      }
+
+      // Convert all <img> elements to data URIs
+      const imgs = Array.from(document.querySelectorAll('img[src]'));
+      const batchSize = 6; // Fetch 6 images at a time
+      for (let i = 0; i < imgs.length; i += batchSize) {
+        const batch = imgs.slice(i, i + batchSize);
+        await Promise.allSettled(batch.map(async (img) => {
+          const src = img.getAttribute('src');
+          if (!src || src.startsWith('data:') || src.startsWith('blob:')) return;
+          const dataUri = await fetchAsDataUri(src);
+          if (dataUri) {
+            img.setAttribute('src', dataUri);
+            img.removeAttribute('srcset');
+            img.removeAttribute('data-srcset');
+          }
+        }));
+      }
+
+      // Convert CSS background-image url() to data URIs for key elements
+      const bgElements = Array.from(document.querySelectorAll('[style*="background"]'));
+      await Promise.allSettled(bgElements.map(async (el) => {
+        const style = el.getAttribute('style') || '';
+        const urlMatch = style.match(/url\(['"]?(https?:\/\/[^'")\s]+)['"]?\)/);
+        if (!urlMatch) return;
+        const bgUrl = urlMatch[1];
+        if (bgUrl.startsWith('data:')) return;
+        const dataUri = await fetchAsDataUri(bgUrl);
+        if (dataUri) {
+          el.setAttribute('style', style.replace(urlMatch[0], `url(${dataUri})`));
+        }
+      }));
+    });
+    console.log(`[proxy] Image conversion complete for ${url}`);
+
     const html = await page.content();
+
+    // Extract and cache cookies from the browser session
+    try {
+      const cookies = await page.cookies();
+      if (cookies.length > 0) {
+        const domain = new URL(url).hostname;
+        const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+        setCookiesForDomain(domain, cookieStr);
+      }
+    } catch {}
+
     await browser.close();
     return html;
   } catch (error) {
