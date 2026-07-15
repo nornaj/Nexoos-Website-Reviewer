@@ -264,153 +264,123 @@ async function fetchWithBrowser(url) {
     // Convert images to inline data URIs from within the browser
     // (the browser has the SiteGround cookies, so it can fetch assets)
     console.log(`[proxy] Converting images to inline data URIs for ${url}...`);
-
-    // First: trigger lazy loading by scrolling through the page
     await page.evaluate(async () => {
-      const scrollStep = window.innerHeight;
-      const maxScroll = document.body.scrollHeight;
-      for (let y = 0; y < maxScroll; y += scrollStep) {
-        window.scrollTo(0, y);
-        await new Promise(r => setTimeout(r, 150));
-      }
-      window.scrollTo(0, 0);
-      await new Promise(r => setTimeout(r, 300));
-    });
+      // Cache: url -> dataUri (avoids re-fetching the same URL)
+      const cache = new Map();
 
-    // Now convert ALL image sources to data URIs
-    await page.evaluate(async () => {
       async function fetchAsDataUri(url, timeout = 8000) {
+        if (!url || url.startsWith('data:') || url.startsWith('blob:')) return null;
+        if (cache.has(url)) return cache.get(url);
         try {
-          if (!url || url.startsWith('data:') || url.startsWith('blob:') || url === 'about:blank') return null;
-          // Make relative URLs absolute
-          if (url.startsWith('/') && !url.startsWith('//')) {
-            url = window.location.origin + url;
-          } else if (url.startsWith('//')) {
-            url = 'https:' + url;
-          }
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), timeout);
           const res = await fetch(url, { signal: controller.signal });
           clearTimeout(timer);
-          if (!res.ok) return null;
+          if (!res.ok) { cache.set(url, null); return null; }
           const blob = await res.blob();
-          // Skip non-image content types and very large files (> 4MB)
-          if (blob.size > 4 * 1024 * 1024) return null;
-          return new Promise((resolve) => {
+          if (blob.size > 4 * 1024 * 1024) { cache.set(url, null); return null; }
+          const result = await new Promise((resolve) => {
             const reader = new FileReader();
             reader.onloadend = () => resolve(reader.result);
             reader.onerror = () => resolve(null);
             reader.readAsDataURL(blob);
           });
-        } catch { return null; }
+          cache.set(url, result);
+          return result;
+        } catch { cache.set(url, null); return null; }
       }
 
-      const processed = new Set();
-      const batchSize = 8;
-
+      const batchSize = 6;
       async function processBatch(items, handler) {
         for (let i = 0; i < items.length; i += batchSize) {
-          const batch = items.slice(i, i + batchSize);
-          await Promise.allSettled(batch.map(handler));
+          await Promise.allSettled(items.slice(i, i + batchSize).map(handler));
         }
       }
 
-      // 1. Convert all <img> elements (src and data-src variants)
-      const imgs = Array.from(document.querySelectorAll('img'));
+      // 1. Convert <img> elements (the proven approach)
+      const imgs = Array.from(document.querySelectorAll('img[src]'));
       await processBatch(imgs, async (img) => {
-        // Handle lazy-loaded images: copy data-src to src first
-        const lazySrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original');
-        if (lazySrc && !lazySrc.startsWith('data:')) {
-          img.setAttribute('src', lazySrc);
-        }
         const src = img.getAttribute('src');
-        if (!src || src.startsWith('data:') || src.startsWith('blob:') || processed.has(src)) return;
-        processed.add(src);
+        if (!src || src.startsWith('data:') || src.startsWith('blob:')) return;
         const dataUri = await fetchAsDataUri(src);
         if (dataUri) {
           img.setAttribute('src', dataUri);
           img.removeAttribute('srcset');
           img.removeAttribute('data-srcset');
-          img.removeAttribute('data-src');
-          img.removeAttribute('data-lazy-src');
-          img.removeAttribute('data-original');
-          img.removeAttribute('loading'); // remove lazy loading
         }
       });
 
-      // 2. Convert <picture> <source> srcset
+      // 2. Convert lazy-loaded images (only if src is missing/placeholder)
+      const lazyImgs = Array.from(document.querySelectorAll('img[data-src], img[data-lazy-src], img[data-original]'));
+      await processBatch(lazyImgs, async (img) => {
+        const currentSrc = img.getAttribute('src') || '';
+        if (currentSrc.startsWith('data:image') && currentSrc.length > 100) return; // Already converted
+        const lazySrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original');
+        if (!lazySrc || lazySrc.startsWith('data:')) return;
+        const dataUri = await fetchAsDataUri(lazySrc);
+        if (dataUri) {
+          img.setAttribute('src', dataUri);
+          img.removeAttribute('srcset');
+          img.removeAttribute('data-srcset');
+        }
+      });
+
+      // 3. Convert <picture> <source> srcset
       const sources = Array.from(document.querySelectorAll('picture source[srcset]'));
       await processBatch(sources, async (source) => {
         const srcset = source.getAttribute('srcset');
         if (!srcset || srcset.startsWith('data:')) return;
-        // Take the first URL from srcset
         const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
-        if (processed.has(firstUrl)) return;
-        processed.add(firstUrl);
         const dataUri = await fetchAsDataUri(firstUrl);
         if (dataUri) {
           source.setAttribute('srcset', dataUri);
         }
       });
 
-      // 3. Convert <video poster>
+      // 4. Convert <video poster>
       const videos = Array.from(document.querySelectorAll('video[poster]'));
       await processBatch(videos, async (video) => {
         const poster = video.getAttribute('poster');
-        if (!poster || poster.startsWith('data:') || processed.has(poster)) return;
-        processed.add(poster);
+        if (!poster || poster.startsWith('data:')) return;
         const dataUri = await fetchAsDataUri(poster);
         if (dataUri) {
           video.setAttribute('poster', dataUri);
         }
       });
 
-      // 4. Convert ALL background images (computed CSS, not just inline styles)
-      const allElements = Array.from(document.querySelectorAll('*'));
-      const bgElements = [];
-      for (const el of allElements) {
+      // 5. Convert computed CSS background images (catches class-based backgrounds)
+      const allEls = Array.from(document.querySelectorAll('div, section, article, header, footer, figure, span, a, li'));
+      const bgItems = [];
+      for (const el of allEls) {
         try {
-          const computed = window.getComputedStyle(el);
-          const bgImage = computed.backgroundImage;
-          if (bgImage && bgImage !== 'none' && bgImage.includes('url(')) {
-            bgElements.push({ el, bgImage });
+          const bg = window.getComputedStyle(el).backgroundImage;
+          if (bg && bg !== 'none' && bg.includes('url(') && !bg.includes('data:')) {
+            bgItems.push({ el, bg });
           }
         } catch {}
       }
-
-      await processBatch(bgElements, async ({ el, bgImage }) => {
-        // Extract ALL url() references from the background-image
+      await processBatch(bgItems, async ({ el, bg }) => {
         const urlRegex = /url\(\s*['"]?(https?:\/\/[^'"\)\s]+)['"]?\s*\)/gi;
-        let match;
-        let newBgImage = bgImage;
+        let newBg = bg;
         let changed = false;
-
-        while ((match = urlRegex.exec(bgImage)) !== null) {
-          const originalUrl = match[1];
-          if (originalUrl.startsWith('data:') || processed.has(originalUrl)) continue;
-          processed.add(originalUrl);
-          const dataUri = await fetchAsDataUri(originalUrl);
+        let match;
+        while ((match = urlRegex.exec(bg)) !== null) {
+          const dataUri = await fetchAsDataUri(match[1]);
           if (dataUri) {
-            newBgImage = newBgImage.replace(match[0], `url(${dataUri})`);
+            newBg = newBg.replace(match[0], `url(${dataUri})`);
             changed = true;
           }
         }
-
-        if (changed) {
-          el.style.backgroundImage = newBgImage;
-        }
+        if (changed) el.style.backgroundImage = newBg;
       });
 
-      // 5. Handle data-bg attributes (common lazy-load pattern)
-      const dataBgElements = Array.from(document.querySelectorAll('[data-bg], [data-background]'));
-      await processBatch(dataBgElements, async (el) => {
+      // 6. Handle data-bg attributes (common lazy-load pattern)
+      const dataBgEls = Array.from(document.querySelectorAll('[data-bg], [data-background]'));
+      await processBatch(dataBgEls, async (el) => {
         const bgUrl = el.getAttribute('data-bg') || el.getAttribute('data-background');
-        if (!bgUrl || bgUrl.startsWith('data:') || processed.has(bgUrl)) return;
-        processed.add(bgUrl);
+        if (!bgUrl || bgUrl.startsWith('data:')) return;
         const dataUri = await fetchAsDataUri(bgUrl);
-        if (dataUri) {
-          el.style.backgroundImage = `url(${dataUri})`;
-        }
+        if (dataUri) el.style.backgroundImage = `url(${dataUri})`;
       });
     });
     console.log(`[proxy] Image conversion complete for ${url}`);
