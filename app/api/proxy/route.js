@@ -277,56 +277,90 @@ function stripFrameworkScripts(html) {
   return html;
 }
 
-// Rewrite image/media URLs from the target domain to use our asset proxy
+// Rewrite image/media/font URLs from the target domain to use our asset proxy
 function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
   const hostname = new URL(targetOrigin).hostname;
   const assetBase = `${proxyOrigin}/api/asset?url=`;
   
-  // Rewrite img src, source srcset, video/audio src, poster
-  // Match absolute URLs from the target domain in src/poster attributes
+  // Extensions to skip (never proxy scripts/pages)
+  const skipPattern = /\.(js|mjs|json|html|htm|php|aspx)(\?|#|$)/i;
+  
+  // Resolve relative URL to absolute
+  function resolveUrl(url) {
+    if (url.startsWith('//')) return 'https:' + url;
+    if (url.startsWith('/') && !url.startsWith('//')) return targetOrigin + url;
+    if (url.startsWith('http')) return url;
+    return null;
+  }
+  
+  // Check if URL should be proxied through our asset endpoint
+  function shouldProxy(url) {
+    if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return false;
+    if (skipPattern.test(url)) return false;
+    const resolved = resolveUrl(url);
+    return resolved && resolved.includes(hostname);
+  }
+  
+  function getProxied(url) {
+    const resolved = resolveUrl(url);
+    return resolved ? assetBase + encodeURIComponent(resolved) : null;
+  }
+  
+  // 1. Proxy ALL src and poster attributes from the target domain
+  // (no file extension requirement — catches all images, videos, fonts)
   html = html.replace(
-    /((?:src|poster)\s*=\s*["'])(https?:\/\/[^"']*)/gi,
-    (match, prefix, url) => {
-      if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif|mp4|webm|mp3|woff2?|ttf|eot)/i.test(url)) {
-        return `${prefix}${assetBase}${encodeURIComponent(url)}`;
-      }
-      return match;
+    /((?:src|poster)\s*=\s*["'])([^"']+)(["'])/gi,
+    (match, prefix, url, suffix) => {
+      if (!shouldProxy(url)) return match;
+      const proxied = getProxied(url);
+      return proxied ? prefix + proxied + suffix : match;
     }
   );
   
-  // Also catch relative URLs starting with / (not //) in src/poster
+  // 2. Proxy data-src, data-lazy-src, data-bg (WordPress/lazy-loading plugins)
   html = html.replace(
-    /((?:src|poster)\s*=\s*["'])\/((?!\/|api\/)[^"']*\.(png|jpg|jpeg|gif|webp|svg|ico|avif|mp4|webm))/gi,
-    (match, prefix, path) => {
-      return `${prefix}${assetBase}${encodeURIComponent(targetOrigin + '/' + path)}`;
-    }
-  );
-  
-  // Rewrite srcset values
-  html = html.replace(
-    /srcset\s*=\s*"([^"]*)"/gi,
-    (match, srcset) => {
-      const rewritten = srcset.replace(
-        /(https?:\/\/[^\s,]+)/g,
-        (url) => {
-          if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif)/i.test(url)) {
-            return `${assetBase}${encodeURIComponent(url)}`;
+    /((?:data-src|data-lazy-src|data-bg|data-background-image|data-srcset)\s*=\s*["'])([^"']+)(["'])/gi,
+    (match, prefix, url, suffix) => {
+      // Handle data-srcset specially (comma-separated)
+      if (match.toLowerCase().startsWith('data-srcset')) {
+        const rewritten = url.replace(
+          /(https?:\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g,
+          (u) => {
+            if (!shouldProxy(u)) return u;
+            return getProxied(u) || u;
           }
-          return url;
+        );
+        return prefix + rewritten + suffix;
+      }
+      if (!shouldProxy(url)) return match;
+      const proxied = getProxied(url);
+      return proxied ? prefix + proxied + suffix : match;
+    }
+  );
+  
+  // 3. Proxy srcset values (responsive images)
+  html = html.replace(
+    /(srcset\s*=\s*["'])([^"']*)(["'])/gi,
+    (match, prefix, srcset, suffix) => {
+      const rewritten = srcset.replace(
+        /(https?:\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g,
+        (url) => {
+          if (!shouldProxy(url)) return url;
+          return getProxied(url) || url;
         }
       );
-      return `srcset="${rewritten}"`;
+      return prefix + rewritten + suffix;
     }
   );
   
-  // Rewrite CSS background-image url() in inline styles
+  // 4. Proxy url() in ALL CSS — inline styles, <style> tags, browser-inlined CSS
+  // This catches background-image, @font-face src, cursor, etc.
   html = html.replace(
-    /url\(\s*['"]?(https?:\/\/[^'")\s]+)['"]?\s*\)/gi,
+    /url\(\s*['"]?(https?:\/\/[^'")\s]+|\/(?!\/|api\/)[^'")\s]+)['"]?\s*\)/gi,
     (match, url) => {
-      if (url.includes(hostname) && /\.(png|jpg|jpeg|gif|webp|svg|ico|avif)/i.test(url)) {
-        return `url(${assetBase}${encodeURIComponent(url)})`;
-      }
-      return match;
+      if (!shouldProxy(url)) return match;
+      const proxied = getProxied(url);
+      return proxied ? `url(${proxied})` : match;
     }
   );
   
