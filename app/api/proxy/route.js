@@ -871,7 +871,7 @@ export async function GET(request) {
     return new NextResponse(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "public, max-age=300",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
         "X-Frame-Options": "ALLOWALL",
         "Content-Security-Policy": "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data: blob:; style-src * 'unsafe-inline'; script-src * 'unsafe-inline' 'unsafe-eval'; font-src * data:;",
         "Cross-Origin-Resource-Policy": "cross-origin",
