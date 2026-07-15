@@ -374,7 +374,7 @@ export default function WebsitePreview({
         </div>
       )}
 
-      <div className={isMobile ? "mobile-device-frame" : undefined}>
+      <div className={isMobile ? "mobile-device-frame" : "desktop-frame-wrap"}>
         <div
           className={`preview-iframe-wrap${isMobile ? " preview-iframe-wrap--mobile" : ""}`}
           style={iframeWrapStyle}

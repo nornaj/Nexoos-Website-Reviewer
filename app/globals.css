@@ -1009,6 +1009,14 @@ textarea.input-error:focus {
   background: oklch(0.93 0.004 90);
 }
 
+/* Desktop frame wrapper — takes full space of preview panel */
+.desktop-frame-wrap {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
 /* Mobile phone frame */
 .mobile-device-frame {
   position: relative;
