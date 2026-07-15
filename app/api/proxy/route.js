@@ -532,13 +532,15 @@ async function inlineExternalCSS(html, targetOrigin) {
   return html;
 }
 
-// Strip client-side framework JS from Puppeteer-rendered HTML
+// Strip ALL non-Nexoos scripts from the HTML
+// For JS framework sites (Next.js, Nuxt, Remix, React SPA), the SSR HTML
+// already contains the fully rendered content. Keeping scripts would cause
+// hydration failures in the iframe ("This page couldn't load" errors).
 function stripFrameworkScripts(html) {
-  html = html.replace(/<script[^>]*>self\.__next_f\.push[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*src="\/_next\/static[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*id="__NEXT_DATA__"[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*>window\.__NUXT__[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*>window\.__remixContext[\s\S]*?<\/script>/gi, '');
+  // Remove all <script> tags EXCEPT our own Nexoos-injected ones
+  html = html.replace(/<script(?![^>]*data-nexoos)[^>]*>[\s\S]*?<\/script>/gi, '');
+  // Also remove <script> self-closing or empty tags
+  html = html.replace(/<script(?![^>]*data-nexoos)[^>]*\/>/gi, '');
   return html;
 }
 
@@ -673,8 +675,8 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
 }
 
 // Inject Nexoos scripts into the HTML
-function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin = '') {
-  if (wasBrowserRendered) {
+function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin = '') {
+  if (shouldStripScripts) {
     html = stripFrameworkScripts(html);
   }
   
@@ -998,17 +1000,19 @@ export async function GET(request) {
 
     let html;
     let usedBrowser = false;
+    let isJSFramework = false;
 
     if (result.ok && result.html && result.html.trim().length > 0) {
       html = result.html;
+      isJSFramework = needsBrowserRendering(html);
 
-      if (needsBrowserRendering(html)) {
+      if (isJSFramework) {
         console.log(`[proxy] JS-rendered site detected for ${url}, using Puppeteer`);
         try {
           html = await fetchWithBrowser(url);
           usedBrowser = true;
         } catch (browserError) {
-          console.log(`[proxy] Puppeteer failed: ${browserError.message}, using fetch HTML`);
+          console.log(`[proxy] Puppeteer failed: ${browserError.message}, using fetch HTML (will strip scripts)`);
         }
       }
     } else {
@@ -1022,6 +1026,7 @@ export async function GET(request) {
         // If quick fetch got SOME html (even with error status), use it
         if (result.html && result.html.trim().length > 0) {
           html = result.html;
+          isJSFramework = needsBrowserRendering(html);
         } else {
           // Last resort: return a friendly error page
           html = `<!DOCTYPE html><html><head><title>Unable to load</title></head><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0"><div style="text-align:center;max-width:500px"><h2>Unable to load this website</h2><p>The website may be blocking automated access or is temporarily unavailable.</p><p style="color:#888;font-size:14px">${browserError.message}</p></div></body></html>`;
@@ -1040,8 +1045,12 @@ export async function GET(request) {
     const reqUrl = new URL(request.url);
     const proxyOrigin = reqUrl.origin;
 
+    // Strip scripts for JS framework sites (whether browser-rendered or fallback)
+    // This prevents hydration failures in the iframe
+    const shouldStripScripts = usedBrowser || isJSFramework;
+
     // Inject Nexoos scripts
-    html = injectScripts(html, targetUrl, usedBrowser, proxyOrigin);
+    html = injectScripts(html, targetUrl, shouldStripScripts, proxyOrigin);
 
     return new NextResponse(html, {
       headers: {
