@@ -1029,19 +1029,22 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
   return html;
 }
 
-// Detect if the HTML is a JS-rendered shell
-function needsBrowserRendering(html) {
-  const stylesheetCount = (html.match(/<link[^>]+rel=["']stylesheet["'][^>]*>/gi) || []).length;
-  const styleTagCount = (html.match(/<style[^>]*>[^<]{50,}<\/style>/gi) || []).length;
-
+// Detect if the HTML is from a known JS framework (for script stripping)
+function isJSFrameworkSite(html) {
   const isNextJS = /self\.__next_f\.push|__NEXT_DATA__|__next/i.test(html);
   const isReactSPA = /<div\s+id=["'](?:root|app|__next)["'][^>]*>\s*<\/div>/i.test(html);
   const isNuxt = /__NUXT__|window\.__nuxt/i.test(html);
   const isRemix = /window\.__remixContext/i.test(html);
+  return isNextJS || isReactSPA || isNuxt || isRemix;
+}
 
-  const isJSFramework = isNextJS || isReactSPA || isNuxt || isRemix;
+// Detect if the HTML is a JS-rendered shell that needs Puppeteer
+// (i.e., has no meaningful CSS — the page is fully client-rendered)
+function needsBrowserRendering(html) {
+  const stylesheetCount = (html.match(/<link[^>]+rel=["']stylesheet["'][^>]*>/gi) || []).length;
+  const styleTagCount = (html.match(/<style[^>]*>[^<]{50,}<\/style>/gi) || []).length;
 
-  if (isJSFramework && stylesheetCount <= 2 && styleTagCount <= 1) return true;
+  if (isJSFrameworkSite(html) && stylesheetCount <= 2 && styleTagCount <= 1) return true;
   if (stylesheetCount === 0 && styleTagCount === 0) return true;
 
   return false;
@@ -1065,9 +1068,9 @@ export async function GET(request) {
 
     if (result.ok && result.html && result.html.trim().length > 0) {
       html = result.html;
-      isJSFramework = needsBrowserRendering(html);
+      isJSFramework = isJSFrameworkSite(html);
 
-      if (isJSFramework) {
+      if (needsBrowserRendering(html)) {
         console.log(`[proxy] JS-rendered site detected for ${url}, using Puppeteer`);
         try {
           html = await fetchWithBrowser(url);
@@ -1087,7 +1090,7 @@ export async function GET(request) {
         // If quick fetch got SOME html (even with error status), use it
         if (result.html && result.html.trim().length > 0) {
           html = result.html;
-          isJSFramework = needsBrowserRendering(html);
+          isJSFramework = isJSFrameworkSite(html);
         } else {
           // Last resort: return a friendly error page
           html = `<!DOCTYPE html><html><head><title>Unable to load</title></head><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0"><div style="text-align:center;max-width:500px"><h2>Unable to load this website</h2><p>The website may be blocking automated access or is temporarily unavailable.</p><p style="color:#888;font-size:14px">${browserError.message}</p></div></body></html>`;
