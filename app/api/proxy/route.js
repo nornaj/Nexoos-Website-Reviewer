@@ -5,6 +5,7 @@ import { setCookiesForDomain } from "../../../lib/cookie-cache";
 
 // Vercel serverless config
 export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
 
 // Find a locally installed Chrome for development
 function getLocalChromePath() {
@@ -376,7 +377,14 @@ async function fetchCSS(cssUrl) {
     });
     clearTimeout(timeout);
     if (res.ok) {
-      return await res.text();
+      const contentType = res.headers.get('content-type') || '';
+      const text = await res.text();
+      // Reject HTML responses (SiteGround challenge pages masquerading as CSS)
+      if (contentType.includes('text/html') || text.trimStart().startsWith('<!') || text.trimStart().startsWith('<html')) {
+        console.log(`[proxy] CSS fetch returned HTML (challenge page) for: ${cssUrl}`);
+        return null;
+      }
+      return text;
     }
   } catch {}
   return null;
