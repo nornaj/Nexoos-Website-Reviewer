@@ -10,9 +10,12 @@ export const metadata = {
   },
 };
 
+// Server-rendered build timestamp — visible in HTML source to debug caching
+const BUILD_STAMP = new Date().toISOString();
+
 export default function RootLayout({ children }) {
   return (
-    <html lang="en">
+    <html lang="en" data-build={BUILD_STAMP}>
       <body>
         <Providers>{children}</Providers>
       </body>
