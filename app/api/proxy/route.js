@@ -537,10 +537,60 @@ async function inlineExternalCSS(html, targetOrigin) {
 // already contains the fully rendered content. Keeping scripts would cause
 // hydration failures in the iframe ("This page couldn't load" errors).
 function stripFrameworkScripts(html) {
-  // Remove all <script> tags EXCEPT our own Nexoos-injected ones
+  // 1. Extract CSS content embedded in script tags before removing them
+  //    Many Next.js sites embed CSS-in-JS styles as data inside scripts
+  const extractedStyles = [];
+  
+  // Extract __next_f.push data that contains CSS (Next.js RSC payloads)
+  const rscChunks = [];
+  html.replace(/<script[^>]*>self\.__next_f\.push\(\[[\d,]*"([^"]*(?:--[a-zA-Z][\w-]*|\.[\w-]+\s*\{|background|color|font)[^"]*)"\]\)<\/script>/gi,
+    (match, content) => {
+      // Unescape the JSON string content and look for CSS
+      try {
+        const unescaped = content.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+        // Extract CSS-like blocks
+        const cssBlocks = unescaped.match(/[\w\-.#\[\]:>~+*,\s]+\{[^}]+\}/g);
+        if (cssBlocks && cssBlocks.length > 3) {
+          extractedStyles.push(cssBlocks.join('\n'));
+        }
+      } catch {}
+      return match;
+    }
+  );
+
+  // 2. Remove all <script> tags EXCEPT our own Nexoos-injected ones
   html = html.replace(/<script(?![^>]*data-nexoos)[^>]*>[\s\S]*?<\/script>/gi, '');
   // Also remove <script> self-closing or empty tags
   html = html.replace(/<script(?![^>]*data-nexoos)[^>]*\/>/gi, '');
+  
+  // 3. Add dark mode support: if the page uses prefers-color-scheme dark
+  //    or has dark mode CSS variables, inject a helper that applies dark class
+  //    based on the user's system preference (since the JS that normally does this is stripped)
+  const darkModeHelper = `<script data-nexoos="dark-mode">
+(function(){
+  try {
+    var h = document.documentElement;
+    if (!h.classList.contains('dark') && !h.classList.contains('light')) {
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        h.classList.add('dark');
+        h.style.colorScheme = 'dark';
+      }
+    }
+  } catch(e){}
+})();
+</script>`;
+
+  // 4. Inject extracted styles and dark mode helper
+  if (extractedStyles.length > 0 || true) {
+    const styleTag = extractedStyles.length > 0 
+      ? `<style data-nexoos="extracted-css">${extractedStyles.join('\n')}</style>` 
+      : '';
+    
+    if (/<head[^>]*>/i.test(html)) {
+      html = html.replace(/<head[^>]*>/i, `$&${darkModeHelper}${styleTag}`);
+    }
+  }
+  
   return html;
 }
 
