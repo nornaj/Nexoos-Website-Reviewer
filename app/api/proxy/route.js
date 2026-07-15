@@ -44,21 +44,62 @@ async function fetchWithBrowser(url) {
       defaultViewport: { width: 1280, height: 900 },
     });
   } else {
-    // Production (Vercel): use Browserless.io cloud browser
+    // Production (Vercel): use Browserless.io cloud browser with stealth mode
     const token = process.env.BROWSERLESS_TOKEN;
     if (!token) throw new Error("BROWSERLESS_TOKEN is not set");
     browser = await puppeteer.connect({
-      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}`,
+      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}&stealth`,
     });
   }
 
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
+
+    // Set a realistic user-agent to help bypass bot detection
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    );
+
     // Use networkidle2 (allows 2 open connections) — networkidle0 is too strict
     // for sites with analytics, websockets, or continuous polling
     await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
     await new Promise((r) => setTimeout(r, 1000));
+
+    // Detect and wait for Cloudflare JS challenge to resolve
+    const isCloudflare = await page.evaluate(() => {
+      const title = document.title || "";
+      const text = document.body?.textContent || "";
+      return (
+        title.includes("Just a moment") ||
+        text.includes("Checking the site connection security") ||
+        text.includes("Verifying you are human") ||
+        !!document.querySelector("#challenge-running, #challenge-stage")
+      );
+    });
+
+    if (isCloudflare) {
+      console.log(`[proxy] Cloudflare challenge detected for ${url}, waiting...`);
+      try {
+        // Wait up to 15 seconds for the challenge to resolve
+        await page.waitForFunction(
+          () => {
+            const title = document.title || "";
+            return (
+              !title.includes("Just a moment") &&
+              !document.querySelector("#challenge-running, #challenge-stage") &&
+              document.body?.innerText?.length > 200
+            );
+          },
+          { timeout: 15000 }
+        );
+        // Extra wait for page to fully render after challenge
+        await new Promise((r) => setTimeout(r, 2000));
+        console.log(`[proxy] Cloudflare challenge resolved for ${url}`);
+      } catch {
+        console.log(`[proxy] Cloudflare challenge did not resolve for ${url}`);
+      }
+    }
 
     // Wait for body to have real content
     await page.evaluate(() => {
