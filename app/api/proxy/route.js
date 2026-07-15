@@ -676,13 +676,16 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
     (match, prefix, url, suffix) => {
       // Handle data-srcset specially (comma-separated)
       if (match.toLowerCase().startsWith('data-srcset')) {
-        const rewritten = url.replace(
-          /(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g,
-          (u) => {
-            if (!shouldProxy(u)) return u;
-            return getProxied(u) || u;
-          }
-        );
+        const entries = url.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+        const rewritten = entries.map(entry => {
+          return entry.replace(
+            /(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/,
+            (u) => {
+              if (!shouldProxy(u)) return u;
+              return getProxied(u) || u;
+            }
+          );
+        }).join(',');
         return prefix + rewritten + suffix;
       }
       if (!shouldProxy(url)) return match;
@@ -692,16 +695,24 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
   );
   
   // 3. Proxy srcset values (responsive images)
+  // Note: can't simply split on commas — URLs may contain commas (e.g., Cloudflare /cdn-cgi/image/width=1200,quality=80/...)
+  // Instead, we match each srcset entry as: URL followed by optional whitespace+descriptor, then comma or end
   html = html.replace(
-    /(srcset\s*=\s*["'])([^"']*)(["'])/gi,
+    /((?:srcset|imageSrcSet)\s*=\s*["'])([^"']*)(["'])/gi,
     (match, prefix, srcset, suffix) => {
-      const rewritten = srcset.replace(
-        /(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g,
-        (url) => {
-          if (!shouldProxy(url)) return url;
-          return getProxied(url) || url;
-        }
-      );
+      // Parse srcset: split on comma followed by optional whitespace and a URL-start character
+      // Each entry is: <url> [<descriptor>]
+      const entries = srcset.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+      const rewritten = entries.map(entry => {
+        // Match the URL part (everything up to the last whitespace+descriptor like "1x" or "768w")
+        return entry.replace(
+          /(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/,
+          (url) => {
+            if (!shouldProxy(url)) return url;
+            return getProxied(url) || url;
+          }
+        );
+      }).join(',');
       return prefix + rewritten + suffix;
     }
   );
@@ -846,12 +857,15 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     // Also handle srcset
     var srcset = img.getAttribute('srcset');
     if (srcset && !srcset.includes('/api/asset')) {
-      img.setAttribute('srcset', srcset.replace(/(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g, function(url) {
-        if (url.includes('/api/asset')) return url;
-        if (!shouldProxyUrl(url)) return url;
-        var p = proxyUrl(url);
-        return p || url;
-      }));
+      var entries = srcset.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+      img.setAttribute('srcset', entries.map(function(entry) {
+        return entry.replace(/(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/, function(url) {
+          if (url.includes('/api/asset')) return url;
+          if (!shouldProxyUrl(url)) return url;
+          var p = proxyUrl(url);
+          return p || url;
+        });
+      }).join(','));
     }
     // Handle data-src (lazy loading)
     var dataSrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
@@ -893,11 +907,14 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
       el.dataset.nexoosRetried = '1';
       var srcset = el.getAttribute('srcset');
       if (srcset && !srcset.includes('/api/asset')) {
-        el.setAttribute('srcset', srcset.replace(/(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g, function(url) {
-          if (url.includes('/api/asset')) return url;
-          var p = proxyUrl(url);
-          return p || url;
-        }));
+        var entries = srcset.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+        el.setAttribute('srcset', entries.map(function(entry) {
+          return entry.replace(/(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/, function(url) {
+            if (url.includes('/api/asset')) return url;
+            var p = proxyUrl(url);
+            return p || url;
+          });
+        }).join(','));
       }
     }
   }, true);
@@ -914,11 +931,14 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     for (var i = 0; i < sources.length; i++) {
       var s = sources[i];
       if (s.srcset && !s.srcset.includes('/api/asset')) {
-        s.srcset = s.srcset.replace(/(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g, function(url) {
-          if (!shouldProxyUrl(url)) return url;
-          var p = proxyUrl(url);
-          return p || url;
-        });
+        var entries = s.srcset.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+        s.srcset = entries.map(function(entry) {
+          return entry.replace(/(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/, function(url) {
+            if (!shouldProxyUrl(url)) return url;
+            var p = proxyUrl(url);
+            return p || url;
+          });
+        }).join(',');
       }
     }
   }
