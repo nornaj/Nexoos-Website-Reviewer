@@ -1,4 +1,3 @@
-import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
 import { NextResponse } from "next/server";
 import fs from "fs";
@@ -30,6 +29,7 @@ async function fetchWithBrowser(url) {
   let browser;
 
   if (isDev) {
+    // Development: use locally installed Chrome
     const executablePath = getLocalChromePath();
     if (!executablePath) throw new Error("No local Chrome found");
     browser = await puppeteer.launch({
@@ -44,16 +44,17 @@ async function fetchWithBrowser(url) {
       defaultViewport: { width: 1280, height: 900 },
     });
   } else {
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: { width: 1280, height: 900 },
-      executablePath: await chromium.executablePath(),
-      headless: "shell",
+    // Production (Vercel): use Browserless.io cloud browser
+    const token = process.env.BROWSERLESS_TOKEN;
+    if (!token) throw new Error("BROWSERLESS_TOKEN is not set");
+    browser = await puppeteer.connect({
+      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}`,
     });
   }
 
   try {
     const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 900 });
     // Use networkidle2 (allows 2 open connections) — networkidle0 is too strict
     // for sites with analytics, websockets, or continuous polling
     await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
@@ -72,6 +73,46 @@ async function fetchWithBrowser(url) {
           }
         }, 500);
       });
+    });
+
+    // Extract and inline all CSS from the browser's loaded stylesheets.
+    // This solves the CSS rendering problem: the real browser has already
+    // fetched all CSS (with correct referer, cookies, etc.), so we just
+    // grab the parsed rules and inline them into <style> tags.
+    await page.evaluate(async () => {
+      const sheets = Array.from(document.styleSheets);
+      for (const sheet of sheets) {
+        if (!sheet.href) continue; // Skip already-inline styles
+        try {
+          // Try accessing rules directly (same-origin stylesheets)
+          const rules = Array.from(sheet.cssRules).map(r => r.cssText).join('\n');
+          const style = document.createElement('style');
+          style.setAttribute('data-nexoos-browser-inlined', sheet.href);
+          style.textContent = rules;
+          if (sheet.ownerNode && sheet.ownerNode.parentNode) {
+            sheet.ownerNode.parentNode.insertBefore(style, sheet.ownerNode);
+            sheet.ownerNode.remove();
+          }
+        } catch (e) {
+          // Cross-origin stylesheet — fetch from within the page context
+          // (the browser has the correct origin/referer, so this works)
+          try {
+            const res = await fetch(sheet.href);
+            if (res.ok) {
+              const cssText = await res.text();
+              const style = document.createElement('style');
+              style.setAttribute('data-nexoos-browser-inlined', sheet.href);
+              style.textContent = cssText;
+              if (sheet.ownerNode && sheet.ownerNode.parentNode) {
+                sheet.ownerNode.parentNode.insertBefore(style, sheet.ownerNode);
+                sheet.ownerNode.remove();
+              }
+            }
+          } catch (fetchErr) {
+            // Can't access this stylesheet — leave the link tag as-is
+          }
+        }
+      }
     });
 
     const html = await page.content();

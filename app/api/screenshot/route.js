@@ -1,4 +1,3 @@
-import chromium from "@sparticuz/chromium";
 import puppeteer from "puppeteer-core";
 import { NextResponse } from "next/server";
 import fs from "fs";
@@ -67,36 +66,41 @@ export async function GET(request) {
 
   let browser;
   try {
-    // Use @sparticuz/chromium in production (Vercel), local Chrome in dev
     const isDev = process.env.NODE_ENV === "development";
-    let executablePath;
-    let args;
 
     if (isDev) {
-      executablePath = getLocalChromePath();
+      // Development: use locally installed Chrome
+      const executablePath = getLocalChromePath();
       if (!executablePath) {
         return NextResponse.json(
           { error: "No local Chrome found. Install Google Chrome for thumbnails." },
           { status: 500 }
         );
       }
-      args = [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ];
+      browser = await puppeteer.launch({
+        headless: "shell",
+        executablePath,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+        ],
+        defaultViewport: { width: 1280, height: 800 },
+      });
     } else {
-      executablePath = await chromium.executablePath();
-      args = chromium.args;
+      // Production (Vercel): use Browserless.io cloud browser
+      const token = process.env.BROWSERLESS_TOKEN;
+      if (!token) {
+        return NextResponse.json(
+          { error: "BROWSERLESS_TOKEN is not set" },
+          { status: 500 }
+        );
+      }
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}`,
+      });
     }
-
-    browser = await puppeteer.launch({
-      headless: isDev ? "shell" : "shell",
-      executablePath,
-      args,
-      defaultViewport: { width: 1280, height: 800 },
-    });
 
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "networkidle2", timeout: 20000 });
