@@ -629,7 +629,7 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
       // Handle data-srcset specially (comma-separated)
       if (match.toLowerCase().startsWith('data-srcset')) {
         const rewritten = url.replace(
-          /(https?:\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g,
+          /(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g,
           (u) => {
             if (!shouldProxy(u)) return u;
             return getProxied(u) || u;
@@ -648,7 +648,7 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
     /(srcset\s*=\s*["'])([^"']*)(["'])/gi,
     (match, prefix, srcset, suffix) => {
       const rewritten = srcset.replace(
-        /(https?:\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g,
+        /(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g,
         (url) => {
           if (!shouldProxy(url)) return url;
           return getProxied(url) || url;
@@ -803,8 +803,9 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
     // Also handle srcset
     var srcset = img.getAttribute('srcset');
     if (srcset && !srcset.includes('/api/asset')) {
-      img.setAttribute('srcset', srcset.replace(/(https?:\\/\\/[^\\s,]+|\\/(\\w[^\\s,]*))/g, function(url) {
+      img.setAttribute('srcset', srcset.replace(/(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g, function(url) {
         if (url.includes('/api/asset')) return url;
+        if (!shouldProxyUrl(url)) return url;
         var p = proxyUrl(url);
         return p || url;
       }));
@@ -849,7 +850,7 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
       el.dataset.nexoosRetried = '1';
       var srcset = el.getAttribute('srcset');
       if (srcset && !srcset.includes('/api/asset')) {
-        el.setAttribute('srcset', srcset.replace(/(https?:\/\/[^\s,]+)/g, function(url) {
+        el.setAttribute('srcset', srcset.replace(/(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g, function(url) {
           if (url.includes('/api/asset')) return url;
           var p = proxyUrl(url);
           return p || url;
@@ -870,7 +871,8 @@ function injectScripts(html, targetUrl, wasBrowserRendered = false, proxyOrigin 
     for (var i = 0; i < sources.length; i++) {
       var s = sources[i];
       if (s.srcset && !s.srcset.includes('/api/asset')) {
-        s.srcset = s.srcset.replace(/(https?:\\/\\/[^\\s,]+|\\/(\\w[^\\s,]*))/g, function(url) {
+        s.srcset = s.srcset.replace(/(https?:\/\/[^\s,]+|\/\/[^\s,]+|\/(?!\/|api\/)[^\s,]+)/g, function(url) {
+          if (!shouldProxyUrl(url)) return url;
           var p = proxyUrl(url);
           return p || url;
         });
