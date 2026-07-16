@@ -69,6 +69,10 @@ async function fetchWithBrowser(url) {
       'Upgrade-Insecure-Requests': '1',
     });
 
+    // Start CSS coverage to capture all CSS loaded by the browser
+    // This captures the actual CSS content even through SiteGround's redirect chains
+    await page.coverage.startCSSCoverage();
+
     // Use networkidle2 (allows 2 open connections) — networkidle0 is too strict
     // for sites with analytics, websockets, or continuous polling
     await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
@@ -98,7 +102,7 @@ async function fetchWithBrowser(url) {
       try {
         // The challenge solves via Web Workers then redirects (may be 2+ hops)
         // Wait for navigation chain to complete
-        for (let hop = 0; hop < 3; hop++) {
+        for (let hop = 0; hop < 5; hop++) {
           try {
             await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 });
           } catch { break; }
@@ -108,13 +112,28 @@ async function fetchWithBrowser(url) {
           const currentTitle = await page.title();
           const isStillChallenge = currentUrl.includes(".well-known") || 
                                     currentUrl.includes("captcha") ||
+                                    currentUrl.includes("sgcaptcha") ||
                                     currentTitle.toLowerCase().includes("robot challenge") ||
                                     currentTitle.includes("Just a moment");
           if (!isStillChallenge) break;
+          console.log(`[proxy] Still on challenge page (hop ${hop + 1}): ${currentUrl}`);
         }
-        // Extra wait for the real page to fully render
-        await new Promise((r) => setTimeout(r, 3000));
-        console.log(`[proxy] Security challenge resolved for ${url}, now at: ${page.url()}`);
+        
+        console.log(`[proxy] Challenge solved, now at: ${page.url()}`);
+        
+        // CRITICAL: Reload the page now that we have the challenge cookies.
+        // The initial load had CSS/images blocked by per-resource challenges.
+        // With cookies set, the reload will load ALL resources cleanly.
+        console.log(`[proxy] Reloading page with challenge cookies to load CSS/resources...`);
+        
+        // Restart CSS coverage for the clean reload
+        try { await page.coverage.stopCSSCoverage(); } catch {}
+        await page.coverage.startCSSCoverage();
+        
+        await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
+        await new Promise((r) => setTimeout(r, 2000));
+        
+        console.log(`[proxy] Clean reload complete for ${url}`);
       } catch (e) {
         console.log(`[proxy] Security challenge handling error for ${url}: ${e.message}`);
       }
@@ -414,7 +433,61 @@ async function fetchWithBrowser(url) {
     });
     console.log(`[proxy] Image conversion complete for ${url}`);
 
-    const html = await page.content();
+    let html = await page.content();
+    
+    // Stop CSS coverage and use captured CSS to inline stylesheets
+    // Coverage API captures the full CSS text for every stylesheet loaded by the browser,
+    // even through SiteGround's WAF challenge redirects
+    let coverageEntries = [];
+    try {
+      coverageEntries = await page.coverage.stopCSSCoverage();
+    } catch {}
+    console.log(`[proxy] CSS Coverage captured ${coverageEntries.length} stylesheets`);
+    
+    if (coverageEntries.length > 0) {
+      // Build a map from URL to CSS content
+      const cssMap = new Map();
+      for (const entry of coverageEntries) {
+        if (entry.url && entry.text && entry.text.length > 0 && !entry.text.trimStart().startsWith('<')) {
+          cssMap.set(entry.url, entry.text);
+        }
+      }
+      console.log(`[proxy] CSS Coverage: ${cssMap.size} valid CSS files captured`);
+
+      
+      // Replace <link> stylesheet tags with inline <style>
+      const linkRegex = /<link([^>]*rel=["']stylesheet["'][^>]*)>/gi;
+      let match;
+      let inlinedCount = 0;
+      while ((match = linkRegex.exec(html)) !== null) {
+        const tag = match[0];
+        const hrefMatch = tag.match(/href=["']([^"']+)["']/i);
+        if (!hrefMatch) continue;
+        const href = hrefMatch[1];
+        if (href.includes('fonts.googleapis.com/css')) continue;
+        
+        // Try to find this CSS in coverage data
+        let css = cssMap.get(href);
+        if (!css) {
+          // Try matching by path (ignore query string differences)
+          const hrefBase = href.split('?')[0];
+          for (const [capturedUrl, content] of cssMap) {
+            const capturedBase = capturedUrl.split('?')[0];
+            if (capturedBase === hrefBase || capturedBase.endsWith(hrefBase)) {
+              css = content;
+              break;
+            }
+          }
+        }
+        
+        if (css) {
+          const style = `<style data-nexoos-inlined="${href}">${css}</style>`;
+          html = html.replace(tag, style);
+          inlinedCount++;
+        }
+      }
+      console.log(`[proxy] CSS Coverage inlined: ${inlinedCount} stylesheets`);
+    }
 
     // Extract and cache cookies from the browser session
     try {
@@ -478,10 +551,16 @@ function buildBlockedErrorPage(url, reason) {
 // Detect if HTML is a security challenge/redirect page (not the real site content)
 function isChallengePage(html, status) {
   if (!html) return false;
+  // Real pages are large; challenge/redirect pages are very small
+  // Only check challenge patterns on small HTML (< 5KB)
+  if (html.length > 5000) {
+    // For large HTML, only check for Cloudflare block pages (which can be large)
+    return isCloudflareBlock(html);
+  }
   // SiteGround captcha challenge (202 + tiny meta-refresh to sgcaptcha)
   if (html.includes('sgcaptcha') || html.includes('SG-Captcha') || html.includes('powCaptcha')) return true;
   // Meta refresh to a challenge/captcha URL with very short HTML
-  if (html.length < 1000 && /meta\s+http-equiv=["']refresh["'][^>]*(?:captcha|challenge|\.well-known)/i.test(html)) return true;
+  if (/meta\s+http-equiv=["']refresh["'][^>]*(?:captcha|challenge|\.well-known)/i.test(html)) return true;
   // Cloudflare challenge pages
   if (isCloudflareBlock(html)) return true;
   // Very small HTML with just a redirect (likely a challenge)
@@ -497,13 +576,25 @@ async function quickFetch(url) {
   const timeout = setTimeout(() => controller.abort(), 4000);
 
   try {
+    // Build headers with cached cookies from Puppeteer sessions
+    const headers = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+    };
+    
+    // Include cached cookies to bypass SiteGround/WAF challenges
+    try {
+      const hostname = new URL(url).hostname;
+      const cachedCookies = getCookiesForDomain(hostname);
+      if (cachedCookies) {
+        headers["Cookie"] = cachedCookies;
+      }
+    } catch {}
+
     const res = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
+      headers,
       redirect: "follow",
       signal: controller.signal,
     });
@@ -521,12 +612,25 @@ async function fetchCSS(cssUrl) {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
+    
+    // Build headers with cached cookies from Puppeteer sessions
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "text/css,*/*;q=0.1",
+      "Referer": new URL(cssUrl).origin + "/",
+    };
+    
+    // Include cached cookies to bypass SiteGround/WAF challenges
+    try {
+      const hostname = new URL(cssUrl).hostname;
+      const cachedCookies = getCookiesForDomain(hostname);
+      if (cachedCookies) {
+        headers["Cookie"] = cachedCookies;
+      }
+    } catch {}
+    
     const res = await fetch(cssUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/css,*/*;q=0.1",
-        "Referer": new URL(cssUrl).origin + "/",
-      },
+      headers,
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -578,26 +682,39 @@ async function inlineExternalCSS(html, targetOrigin) {
   
   const results = await Promise.all(cssPromises);
   
-  // Replace <link> tags with inline <style> tags
+  let failedCount = 0;
+  let inlinedCount = 0;
+  
+  // Replace <link> tags with inline <style> tags, or proxy if fetch failed
   for (const r of results) {
     if (r.css) {
       // Fix relative url() references in CSS to be absolute
       let fixedCSS = r.css.replace(
-        /url\(\s*['"]?(?!data:|http|\/\/)(\/[^'")]+)['"]?\s*\)/gi,
+        /url\(\s*['"]?(?!data:|http|\/\/)(\/[^'")\s]+)['"]?\s*\)/gi,
         `url(${targetOrigin}$1)`
       );
       fixedCSS = fixedCSS.replace(
-        /url\(\s*['"]?(?!data:|http|\/\/|\/)([^'")]+)['"]?\s*\)/gi,
+        /url\(\s*['"]?(?!data:|http|\/\/|\/)([^'")\s]+)['"]?\s*\)/gi,
         (match, path) => {
           const cssDir = r.url.substring(0, r.url.lastIndexOf("/") + 1);
           return `url(${cssDir}${path})`;
         }
       );
       html = html.replace(r.tag, `<style data-nexoos-inlined="${r.url}">${fixedCSS}</style>`);
+      inlinedCount++;
+    } else {
+      // CSS fetch failed (WAF, timeout, etc.) — rewrite the link href 
+      // to go through our asset proxy so the browser can still load it
+      const proxiedHref = `/api/asset?url=${encodeURIComponent(r.url)}`;
+      const newTag = r.tag.replace(/href=['"][^'"]+['"]/, `href="${proxiedHref}"`);
+      html = html.replace(r.tag, newTag);
+      failedCount++;
+      console.log(`[proxy] CSS inline failed for ${r.url}, proxying link instead`);
     }
   }
 
-  return html;
+  console.log(`[proxy] CSS inlining: ${inlinedCount} inlined, ${failedCount} failed out of ${matches.length} total`);
+  return { html, failedCount, totalCount: matches.length };
 }
 
 // Strip ALL non-Nexoos scripts from the HTML
@@ -1182,7 +1299,24 @@ export async function GET(request) {
 
     // Always inline external CSS to bypass cross-origin blocking
     try {
-      html = await inlineExternalCSS(html, targetUrl.origin);
+      const cssResult = await inlineExternalCSS(html, targetUrl.origin);
+      html = cssResult.html;
+      
+
+      
+      // If many CSS files failed to inline, force a (re-)render with Puppeteer
+      // The browser natively loads CSS, and document.styleSheets can extract it
+      if (cssResult.failedCount > 3 && cssResult.failedCount > cssResult.totalCount * 0.5) {
+        console.log(`[proxy] ${cssResult.failedCount}/${cssResult.totalCount} CSS files failed to inline, retrying with Puppeteer...`);
+        try {
+          html = await fetchWithBrowser(url);
+          usedBrowser = true;
+          isJSFramework = true; // Force script stripping for Puppeteer output
+        } catch (browserError) {
+          console.log(`[proxy] Puppeteer CSS retry failed: ${browserError.message}`);
+          // Keep the quickFetch HTML with proxied CSS links as fallback
+        }
+      }
     } catch (e) {
       console.log(`[proxy] CSS inlining failed: ${e.message}`);
     }
