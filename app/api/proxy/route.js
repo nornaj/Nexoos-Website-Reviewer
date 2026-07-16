@@ -50,13 +50,24 @@ async function fetchWithBrowser(url) {
     const token = process.env.BROWSERLESS_TOKEN;
     if (!token) throw new Error("BROWSERLESS_TOKEN is not set");
     browser = await puppeteer.connect({
-      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}&stealth`,
+      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}&stealth&blockAds`,
     });
   }
 
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
+    
+    // Set extra headers to look more like a real browser
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Upgrade-Insecure-Requests': '1',
+    });
 
     // Use networkidle2 (allows 2 open connections) — networkidle0 is too strict
     // for sites with analytics, websockets, or continuous polling
@@ -421,6 +432,43 @@ async function fetchWithBrowser(url) {
     await browser.close().catch(() => {});
     throw error;
   }
+}
+
+// Detect if HTML is a Cloudflare/WAF block page (403 Forbidden, challenge, etc.)
+function isCloudflareBlock(html) {
+  if (!html) return false;
+  // Cloudflare 403 page markers
+  if (/403 Forbidden|403 - Forbidden/i.test(html) && /cloudflare|cf-ray|cf-error/i.test(html)) return true;
+  // Cloudflare "Attention Required" challenge
+  if (/Attention Required|Access denied/i.test(html) && /cloudflare/i.test(html)) return true;
+  // Cloudflare "Just a moment" interstitial
+  if (/Just a moment|Checking your browser/i.test(html) && /challenge-platform|cf-challenge/i.test(html)) return true;
+  // Generic WAF blocks
+  if (/Access to this page is forbidden/i.test(html)) return true;
+  // Sucuri/SiteGround WAF
+  if (/sucuri|firewall|blocked|security check/i.test(html) && html.length < 5000) return true;
+  return false;
+}
+
+// Build a styled error page for blocked sites
+function buildBlockedErrorPage(url, reason) {
+  const domain = new URL(url).hostname;
+  return `<!DOCTYPE html><html><head><title>Unable to load ${domain}</title></head>
+<body style="font-family:system-ui,-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0f0f13;color:#e0e0e0">
+<div style="text-align:center;max-width:520px;padding:40px">
+  <div style="font-size:48px;margin-bottom:16px">🔒</div>
+  <h2 style="margin:0 0 12px;font-size:22px;color:#fff">Unable to load this website</h2>
+  <p style="margin:0 0 20px;color:#999;font-size:15px;line-height:1.5">${reason}</p>
+  <div style="background:#1a1a24;border-radius:8px;padding:16px;margin:20px 0;text-align:left">
+    <p style="margin:0 0 8px;color:#888;font-size:13px">Website URL:</p>
+    <p style="margin:0;color:#6c9bff;font-size:14px;word-break:break-all">${url}</p>
+  </div>
+  <p style="margin:0;color:#666;font-size:13px;line-height:1.5">
+    Some websites use aggressive bot protection (Cloudflare, Sucuri, etc.) that blocks automated access.
+    Try loading the website directly in a new tab to verify it's accessible.
+  </p>
+</div>
+</body></html>`;
 }
 
 // Quick fetch with a tight timeout
@@ -1066,7 +1114,7 @@ export async function GET(request) {
     let usedBrowser = false;
     let isJSFramework = false;
 
-    if (result.ok && result.html && result.html.trim().length > 0) {
+    if (result.ok && result.html && result.html.trim().length > 0 && !isCloudflareBlock(result.html)) {
       html = result.html;
       isJSFramework = isJSFrameworkSite(html);
 
@@ -1080,20 +1128,32 @@ export async function GET(request) {
         }
       }
     } else {
-      // Quick fetch failed — try Puppeteer, but fall back gracefully
-      console.log(`[proxy] Quick fetch failed for ${url} (HTTP ${result.status}), using Puppeteer`);
+      // Quick fetch failed (403, 5xx, timeout, etc.) — try Puppeteer
+      const statusCode = result.status;
+      console.log(`[proxy] Quick fetch failed for ${url} (HTTP ${statusCode}), using Puppeteer`);
       try {
         html = await fetchWithBrowser(url);
         usedBrowser = true;
+        
+        // Verify Puppeteer didn't also get a Cloudflare/WAF block page
+        if (html && isCloudflareBlock(html)) {
+          console.log(`[proxy] Puppeteer also got blocked by Cloudflare for ${url}`);
+          // Return a helpful error page instead of the Cloudflare block
+          html = buildBlockedErrorPage(url, 'This website uses Cloudflare protection that is blocking automated access.');
+          usedBrowser = false;
+        }
       } catch (browserError) {
         console.log(`[proxy] Puppeteer also failed: ${browserError.message}`);
-        // If quick fetch got SOME html (even with error status), use it
-        if (result.html && result.html.trim().length > 0) {
+        // Check if quick fetch got any usable HTML (not a Cloudflare block)
+        if (result.html && result.html.trim().length > 0 && !isCloudflareBlock(result.html)) {
           html = result.html;
           isJSFramework = isJSFrameworkSite(html);
         } else {
-          // Last resort: return a friendly error page
-          html = `<!DOCTYPE html><html><head><title>Unable to load</title></head><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0"><div style="text-align:center;max-width:500px"><h2>Unable to load this website</h2><p>The website may be blocking automated access or is temporarily unavailable.</p><p style="color:#888;font-size:14px">${browserError.message}</p></div></body></html>`;
+          // Return a friendly error page instead of a Cloudflare 403
+          const reason = statusCode === 403 
+            ? 'This website uses Cloudflare/WAF protection that is blocking automated access.'
+            : browserError.message;
+          html = buildBlockedErrorPage(url, reason);
         }
       }
     }
