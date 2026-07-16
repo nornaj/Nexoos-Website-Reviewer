@@ -318,7 +318,7 @@ async function fetchWithBrowser(url) {
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), timeout);
-          const res = await fetch(url, { signal: controller.signal });
+          const res = await fetch(url, { signal: controller.signal, credentials: 'include' });
           clearTimeout(timer);
           if (!res.ok) { cache.set(url, null); return null; }
           const blob = await res.blob();
@@ -334,6 +334,21 @@ async function fetchWithBrowser(url) {
         } catch { cache.set(url, null); return null; }
       }
 
+      // Canvas-based image extraction: draw already-rendered images to canvas
+      // This works even when fetch() is blocked by WAF, because the browser
+      // already loaded the images during page render
+      function imgToDataUri(img) {
+        try {
+          if (!img.complete || img.naturalWidth === 0) return null;
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          return canvas.toDataURL('image/png');
+        } catch { return null; } // CORS-tainted canvas will throw
+      }
+
       const batchSize = 6;
       async function processBatch(items, handler) {
         for (let i = 0; i < items.length; i += batchSize) {
@@ -341,12 +356,20 @@ async function fetchWithBrowser(url) {
         }
       }
 
-      // 1. Convert <img> elements (the proven approach)
+      // 1. Convert <img> elements — try canvas first, then fetch as fallback
       const imgs = Array.from(document.querySelectorAll('img[src]'));
       await processBatch(imgs, async (img) => {
         const src = img.getAttribute('src');
         if (!src || src.startsWith('data:') || src.startsWith('blob:')) return;
-        const dataUri = await fetchAsDataUri(src);
+        
+        // Try canvas extraction first (uses already-rendered image)
+        let dataUri = imgToDataUri(img);
+        
+        // Fallback to fetch if canvas failed (CORS or not loaded)
+        if (!dataUri) {
+          dataUri = await fetchAsDataUri(src);
+        }
+        
         if (dataUri) {
           img.setAttribute('src', dataUri);
           img.removeAttribute('srcset');
@@ -949,11 +972,13 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
       opacity: 0 !important;
       pointer-events: none !important;
     }
-    /* Prevent body scroll lock from popup scripts */
+    /* Prevent body scroll lock from popup scripts and horizontal overflow */
     html, body {
-      overflow: auto !important;
+      overflow-x: hidden !important;
+      overflow-y: auto !important;
       position: static !important;
       height: auto !important;
+      max-width: 100vw !important;
     }
     /* Hide scrollbars in mobile mode (still scrollable) */
     html, body, * {
@@ -992,7 +1017,7 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
   
   // Known CDN domains to always proxy
   var CDN_DOMAINS = ['cdn.shopify.com','cdn.shopifycdn.net','images.unsplash.com','cdn.jsdelivr.net','cdn.builder.io','images.contentful.com','res.cloudinary.com','cdn.sanity.io','images.prismic.io','cdn.bigcommerce.com','akamaized.net','cloudfront.net','imgix.net','fastly.net'];
-  var MEDIA_EXT = /\.(png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|woff2?|ttf|eot|otf)(\?|#|$)/i;
+  var MEDIA_EXT = /\.(png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|woff2?|ttf|eot|otf)([?#]|$)/i;
 
   // Convert any URL to an absolute URL using the target origin
   function resolveUrl(url) {
