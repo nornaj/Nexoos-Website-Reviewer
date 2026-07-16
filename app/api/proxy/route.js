@@ -468,48 +468,36 @@ async function fetchWithBrowser(url) {
     console.log(`[proxy] CSS Coverage captured ${coverageEntries.length} stylesheets`);
     
     if (coverageEntries.length > 0) {
-      // Build a map from URL to CSS content
-      const cssMap = new Map();
+      // Collect ALL valid CSS from coverage (inline styles + external sheets)
+      const allCSS = [];
       for (const entry of coverageEntries) {
-        if (entry.url && entry.text && entry.text.length > 0 && !entry.text.trimStart().startsWith('<')) {
-          cssMap.set(entry.url, entry.text);
+        if (entry.text && entry.text.length > 0 && !entry.text.trimStart().startsWith('<')) {
+          allCSS.push(entry.text);
         }
       }
-      console.log(`[proxy] CSS Coverage: ${cssMap.size} valid CSS files captured`);
-
+      console.log(`[proxy] CSS Coverage: ${allCSS.length} valid CSS blocks captured`);
       
-      // Replace <link> stylesheet tags with inline <style>
-      const linkRegex = /<link([^>]*rel=["']stylesheet["'][^>]*)>/gi;
-      let match;
-      let inlinedCount = 0;
-      while ((match = linkRegex.exec(html)) !== null) {
-        const tag = match[0];
-        const hrefMatch = tag.match(/href=["']([^"']+)["']/i);
-        if (!hrefMatch) continue;
-        const href = hrefMatch[1];
-        if (href.includes('fonts.googleapis.com/css')) continue;
-        
-        // Try to find this CSS in coverage data
-        let css = cssMap.get(href);
-        if (!css) {
-          // Try matching by path (ignore query string differences)
-          const hrefBase = href.split('?')[0];
-          for (const [capturedUrl, content] of cssMap) {
-            const capturedBase = capturedUrl.split('?')[0];
-            if (capturedBase === hrefBase || capturedBase.endsWith(hrefBase)) {
-              css = content;
-              break;
-            }
-          }
-        }
-        
-        if (css) {
-          const style = `<style data-nexoos-inlined="${href}">${css}</style>`;
-          html = html.replace(tag, style);
-          inlinedCount++;
+      if (allCSS.length > 0) {
+        // Inject all captured CSS as a single style block in <head>
+        const combinedCSS = `<style data-nexoos-coverage="true">${allCSS.join('\n')}</style>`;
+        if (/<head[^>]*>/i.test(html)) {
+          html = html.replace(/<head[^>]*>/i, `$&${combinedCSS}`);
+        } else {
+          html = combinedCSS + html;
         }
       }
-      console.log(`[proxy] CSS Coverage inlined: ${inlinedCount} stylesheets`);
+      
+      // Remove external stylesheet links — their CSS is now inlined via coverage
+      // or was already inlined by Elementor/WordPress JS execution
+      // Keep Google Fonts links (loaded from CDN, not affected by WAF)
+      html = html.replace(/<link[^>]*rel=["']stylesheet["'][^>]*>/gi, (tag) => {
+        if (tag.includes('fonts.googleapis.com') || tag.includes('fonts.gstatic.com')) {
+          return tag; // Keep Google Fonts
+        }
+        return ''; // Remove — CSS already inlined
+      });
+      
+      console.log(`[proxy] CSS Coverage: injected ${allCSS.length} CSS blocks, removed external links`);
     }
 
     // Extract and cache cookies from the browser session
