@@ -574,22 +574,27 @@ function buildBlockedErrorPage(url, reason) {
 // Detect if HTML is a security challenge/redirect page (not the real site content)
 function isChallengePage(html, status) {
   if (!html) return false;
-  // Real pages are large; challenge/redirect pages are very small
-  // Only check challenge patterns on small HTML (< 5KB)
-  if (html.length > 5000) {
-    // For large HTML, only check for Cloudflare block pages (which can be large)
-    return isCloudflareBlock(html);
-  }
-  // SiteGround captcha challenge (202 + tiny meta-refresh to sgcaptcha)
+  
+  // SiteGround-specific checks — these are always checked regardless of page size
+  // because SiteGround challenge pages can be >5KB (embedded SVG robot, inline CSS)
   if (html.includes('sgcaptcha') || html.includes('SG-Captcha') || html.includes('powCaptcha')) return true;
-  // Meta refresh to a challenge/captcha URL with very short HTML
+  if (/Checking the site connection security/i.test(html)) return true;
+  if (/sg-captcha-container|sg-challenge/i.test(html)) return true;
+  if (/Robot Challenge|robot.?challenge/i.test(html)) return true;
+  
+  // Meta refresh to a challenge/captcha URL
   if (/meta\s+http-equiv=["']refresh["'][^>]*(?:captcha|challenge|\.well-known)/i.test(html)) return true;
-  // Cloudflare challenge pages
+  
+  // Cloudflare checks — these can be large pages too
   if (isCloudflareBlock(html)) return true;
+  
+  // For remaining generic checks, only apply to small pages (<5KB)
+  // Real content pages are large; generic redirect/challenge pages are tiny
+  if (html.length > 5000) return false;
+  
   // Very small HTML with just a redirect (likely a challenge)
   if (html.length < 500 && /meta\s+http-equiv=["']refresh["']/i.test(html)) return true;
-  // Robot Challenge Screen (SiteGround)
-  if (/Robot Challenge|robot.?challenge/i.test(html)) return true;
+  
   return false;
 }
 
@@ -940,13 +945,17 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
 }
 
 // Inject Nexoos scripts into the HTML
-function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin = '') {
+function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin = '', usedBrowser = false) {
   if (shouldStripScripts) {
     html = stripFrameworkScripts(html);
   }
   
   // Proxy image/media URLs through our asset endpoint (server-side)
-  html = proxyAssetUrls(html, targetUrl.origin, proxyOrigin);
+  // Skip for browser-rendered pages — SiteGround's asset proxy returns 502,
+  // but the user's real browser can load images directly from the origin
+  if (!usedBrowser) {
+    html = proxyAssetUrls(html, targetUrl.origin, proxyOrigin);
+  }
   
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
 
@@ -1012,8 +1021,12 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
   var TARGET_ORIGIN = '${targetOrigin}';
   var PROXY_ORIGIN = window.location.origin;
   var ASSET_PROXY = PROXY_ORIGIN + '/api/asset?url=';
+  var USED_BROWSER = ${usedBrowser ? 'true' : 'false'};
 
-  // ===== IMAGE PROXY: Permanent catch-all solution =====
+  // ===== IMAGE PROXY: Only for non-browser-rendered pages =====
+  // When Puppeteer rendered the page, images have absolute URLs that the
+  // user's browser can load directly (bypasses SiteGround WAF natively)
+  if (!USED_BROWSER) {
   
   // Known CDN domains to always proxy
   var CDN_DOMAINS = ['cdn.shopify.com','cdn.shopifycdn.net','images.unsplash.com','cdn.jsdelivr.net','cdn.builder.io','images.contentful.com','res.cloudinary.com','cdn.sanity.io','images.prismic.io','cdn.bigcommerce.com','akamaized.net','cloudfront.net','imgix.net','fastly.net'];
@@ -1183,6 +1196,8 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     attributes: true,
     attributeFilter: ['src']
   });
+
+  } // end if (!USED_BROWSER)
 
   // ===== SCROLL & NAVIGATION =====
   
@@ -1355,7 +1370,7 @@ export async function GET(request) {
     const shouldStripScripts = usedBrowser || isJSFramework;
 
     // Inject Nexoos scripts
-    html = injectScripts(html, targetUrl, shouldStripScripts, proxyOrigin);
+    html = injectScripts(html, targetUrl, shouldStripScripts, proxyOrigin, usedBrowser);
 
     return new NextResponse(html, {
       headers: {
