@@ -119,6 +119,23 @@ async function fetchWithBrowser(url) {
           console.log(`[proxy] Still on challenge page (hop ${hop + 1}): ${currentUrl}`);
         }
         
+        // Ensure we've actually left the challenge page
+        // The PoW challenge may still be solving — wait for the redirect to complete
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 30000) {
+          const currentUrl = page.url();
+          if (!currentUrl.includes('.well-known') && !currentUrl.includes('captcha') && !currentUrl.includes('sgcaptcha')) {
+            break;
+          }
+          // Wait for any pending navigation
+          try {
+            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 5000 });
+          } catch {
+            // Navigation may have already happened, check URL again
+            await new Promise(r => setTimeout(r, 1000));
+          }
+        }
+        
         console.log(`[proxy] Challenge solved, now at: ${page.url()}`);
         
         // CRITICAL: Reload the page now that we have the challenge cookies.
@@ -469,13 +486,37 @@ async function fetchWithBrowser(url) {
     
     if (coverageEntries.length > 0) {
       // Collect ALL valid CSS from coverage (inline styles + external sheets)
-      const allCSS = [];
+      let allCSS = [];
       for (const entry of coverageEntries) {
         if (entry.text && entry.text.length > 0 && !entry.text.trimStart().startsWith('<')) {
           allCSS.push(entry.text);
         }
       }
-      console.log(`[proxy] CSS Coverage: ${allCSS.length} valid CSS blocks captured`);
+      console.log(`[proxy] CSS Coverage: ${allCSS.length}/${coverageEntries.length} valid CSS blocks`);
+      
+      // If most coverage entries were HTML (challenge pages), the CSS didn't load properly.
+      // Do a clean reload to let the browser load CSS with existing cookies.
+      if (allCSS.length < coverageEntries.length * 0.5 && coverageEntries.length > 5) {
+        console.log(`[proxy] Most CSS was challenged, doing clean reload...`);
+        try {
+          await page.coverage.startCSSCoverage();
+          await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
+          await new Promise(r => setTimeout(r, 2000));
+          
+          const reloadEntries = await page.coverage.stopCSSCoverage();
+          allCSS = [];
+          for (const entry of reloadEntries) {
+            if (entry.text && entry.text.length > 0 && !entry.text.trimStart().startsWith('<')) {
+              allCSS.push(entry.text);
+            }
+          }
+          // Re-capture the HTML after reload
+          html = await page.content();
+          console.log(`[proxy] After reload: ${allCSS.length}/${reloadEntries.length} valid CSS blocks`);
+        } catch (e) {
+          console.log(`[proxy] CSS reload failed: ${e.message}`);
+        }
+      }
       
       if (allCSS.length > 0) {
         // Inject all captured CSS as a single style block in <head>
@@ -939,11 +980,9 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
   }
   
   // Proxy image/media URLs through our asset endpoint (server-side)
-  // Skip for browser-rendered pages — SiteGround's asset proxy returns 502,
-  // but the user's real browser can load images directly from the origin
-  if (!usedBrowser) {
-    html = proxyAssetUrls(html, targetUrl.origin, proxyOrigin);
-  }
+  // ALL images must go through the proxy because the user's browser
+  // doesn't have the SiteGround challenge cookies — only our server does
+  html = proxyAssetUrls(html, targetUrl.origin, proxyOrigin);
   
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
 
@@ -1011,10 +1050,10 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
   var ASSET_PROXY = PROXY_ORIGIN + '/api/asset?url=';
   var USED_BROWSER = ${usedBrowser ? 'true' : 'false'};
 
-  // ===== IMAGE PROXY: Only for non-browser-rendered pages =====
-  // When Puppeteer rendered the page, images have absolute URLs that the
-  // user's browser can load directly (bypasses SiteGround WAF natively)
-  if (!USED_BROWSER) {
+  // ===== IMAGE PROXY: Always proxy images through our server =====
+  // The user's browser doesn't have SiteGround challenge cookies,
+  // so ALL images must go through our asset proxy
+  {
   
   // Known CDN domains to always proxy
   var CDN_DOMAINS = ['cdn.shopify.com','cdn.shopifycdn.net','images.unsplash.com','cdn.jsdelivr.net','cdn.builder.io','images.contentful.com','res.cloudinary.com','cdn.sanity.io','images.prismic.io','cdn.bigcommerce.com','akamaized.net','cloudfront.net','imgix.net','fastly.net'];
@@ -1185,7 +1224,7 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     attributeFilter: ['src']
   });
 
-  } // end if (!USED_BROWSER)
+  }
 
   // ===== SCROLL & NAVIGATION =====
   

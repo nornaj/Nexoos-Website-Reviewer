@@ -31,6 +31,7 @@ export async function GET(request) {
 
     // If we got an HTML response (likely a security challenge), try following the redirect
     const contentType = res.headers.get("content-type") || "";
+    console.log(`[asset] ${targetUrl.pathname.split('/').pop()} → ${res.status} ${contentType.split(';')[0]} cookies:${cachedCookies ? 'yes' : 'no'}`);
     if (contentType.includes("text/html") && !url.endsWith(".html") && !url.endsWith(".htm")) {
       // This is probably a security challenge redirect — try to extract the redirect URL
       const html = await res.text();
