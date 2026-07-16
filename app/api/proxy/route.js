@@ -434,7 +434,7 @@ async function fetchWithBrowser(url) {
   }
 }
 
-// Detect if HTML is a Cloudflare/WAF block page (403 Forbidden, challenge, etc.)
+// Detect if HTML is a WAF/CDN block page (Cloudflare, SiteGround, Sucuri, etc.)
 function isCloudflareBlock(html) {
   if (!html) return false;
   // Cloudflare 403 page markers (require both 403 AND Cloudflare identifiers)
@@ -445,8 +445,12 @@ function isCloudflareBlock(html) {
   if (/Just a moment|Checking your browser/i.test(html) && /challenge-platform|cf-challenge/i.test(html)) return true;
   // Specific Cloudflare error pages (require cf-error-details or cf-wrapper)
   if (/cf-error-details|cf-wrapper|cf-alert/i.test(html) && /cloudflare/i.test(html)) return true;
+  // SiteGround WAF block page (403 - Forbidden + Access to this page is forbidden)
+  if (/403 - Forbidden/i.test(html) && /Access to this page is forbidden/i.test(html)) return true;
   // Sucuri WAF block (very specific — requires Sucuri branding)
   if (/sucuri\.net|cloudproxy/i.test(html) && /blocked|access denied/i.test(html) && html.length < 5000) return true;
+  // Generic: any short page (< 10KB) that's just a 403 error page
+  if (/403 Forbidden|403 - Forbidden/i.test(html) && html.length < 10000 && !/<!DOCTYPE html>/i.test(html.substring(500))) return true;
   return false;
 }
 
@@ -1161,8 +1165,9 @@ export async function GET(request) {
         }
       } catch (browserError) {
         console.log(`[proxy] Puppeteer also failed: ${browserError.message}`);
-        // Check if quick fetch got any usable HTML (not a Cloudflare block)
-        if (result.html && result.html.trim().length > 0 && !isCloudflareBlock(result.html)) {
+        // Check if quick fetch got any usable HTML (not a block/challenge page)
+        if (result.html && result.html.trim().length > 0 
+            && !isCloudflareBlock(result.html) && !isChallengePage(result.html, result.status)) {
           html = result.html;
           isJSFramework = isJSFrameworkSite(html);
         } else {
