@@ -437,16 +437,16 @@ async function fetchWithBrowser(url) {
 // Detect if HTML is a Cloudflare/WAF block page (403 Forbidden, challenge, etc.)
 function isCloudflareBlock(html) {
   if (!html) return false;
-  // Cloudflare 403 page markers
+  // Cloudflare 403 page markers (require both 403 AND Cloudflare identifiers)
   if (/403 Forbidden|403 - Forbidden/i.test(html) && /cloudflare|cf-ray|cf-error/i.test(html)) return true;
   // Cloudflare "Attention Required" challenge
   if (/Attention Required|Access denied/i.test(html) && /cloudflare/i.test(html)) return true;
   // Cloudflare "Just a moment" interstitial
   if (/Just a moment|Checking your browser/i.test(html) && /challenge-platform|cf-challenge/i.test(html)) return true;
-  // Generic WAF blocks
-  if (/Access to this page is forbidden/i.test(html)) return true;
-  // Sucuri/SiteGround WAF
-  if (/sucuri|firewall|blocked|security check/i.test(html) && html.length < 5000) return true;
+  // Specific Cloudflare error pages (require cf-error-details or cf-wrapper)
+  if (/cf-error-details|cf-wrapper|cf-alert/i.test(html) && /cloudflare/i.test(html)) return true;
+  // Sucuri WAF block (very specific — requires Sucuri branding)
+  if (/sucuri\.net|cloudproxy/i.test(html) && /blocked|access denied/i.test(html) && html.length < 5000) return true;
   return false;
 }
 
@@ -1152,11 +1152,11 @@ export async function GET(request) {
         html = await fetchWithBrowser(url);
         usedBrowser = true;
         
-        // Verify Puppeteer didn't also get a Cloudflare/WAF block page
-        if (html && isCloudflareBlock(html)) {
-          console.log(`[proxy] Puppeteer also got blocked by Cloudflare for ${url}`);
-          // Return a helpful error page instead of the Cloudflare block
-          html = buildBlockedErrorPage(url, 'This website uses Cloudflare protection that is blocking automated access.');
+        // Verify Puppeteer didn't also get stuck on a challenge page
+        // (only check for challenge pages, NOT generic isCloudflareBlock which can false-positive on real content)
+        if (html && isChallengePage(html, 0)) {
+          console.log(`[proxy] Puppeteer also got a challenge page for ${url}`);
+          html = buildBlockedErrorPage(url, 'This website has bot protection that could not be bypassed automatically.');
           usedBrowser = false;
         }
       } catch (browserError) {
