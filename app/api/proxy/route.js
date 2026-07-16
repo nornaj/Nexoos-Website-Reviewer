@@ -471,6 +471,22 @@ function buildBlockedErrorPage(url, reason) {
 </body></html>`;
 }
 
+// Detect if HTML is a security challenge/redirect page (not the real site content)
+function isChallengePage(html, status) {
+  if (!html) return false;
+  // SiteGround captcha challenge (202 + tiny meta-refresh to sgcaptcha)
+  if (html.includes('sgcaptcha') || html.includes('SG-Captcha') || html.includes('powCaptcha')) return true;
+  // Meta refresh to a challenge/captcha URL with very short HTML
+  if (html.length < 1000 && /meta\s+http-equiv=["']refresh["'][^>]*(?:captcha|challenge|\.well-known)/i.test(html)) return true;
+  // Cloudflare challenge pages
+  if (isCloudflareBlock(html)) return true;
+  // Very small HTML with just a redirect (likely a challenge)
+  if (html.length < 500 && /meta\s+http-equiv=["']refresh["']/i.test(html)) return true;
+  // Robot Challenge Screen (SiteGround)
+  if (/Robot Challenge|robot.?challenge/i.test(html)) return true;
+  return false;
+}
+
 // Quick fetch with a tight timeout
 async function quickFetch(url) {
   const controller = new AbortController();
@@ -1114,7 +1130,8 @@ export async function GET(request) {
     let usedBrowser = false;
     let isJSFramework = false;
 
-    if (result.ok && result.html && result.html.trim().length > 0 && !isCloudflareBlock(result.html)) {
+    if (result.ok && result.html && result.html.trim().length > 0 
+        && !isCloudflareBlock(result.html) && !isChallengePage(result.html, result.status)) {
       html = result.html;
       isJSFramework = isJSFrameworkSite(html);
 
