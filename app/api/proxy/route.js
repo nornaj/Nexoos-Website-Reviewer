@@ -1,7 +1,10 @@
 import puppeteer from "puppeteer-core";
 import { NextResponse } from "next/server";
 import fs from "fs";
-import { setCookiesForDomain } from "../../../lib/cookie-cache";
+import { execFile } from "child_process";
+import path from "path";
+import os from "os";
+import { setCookiesForDomain, getCookiesForDomain } from "../../../lib/cookie-cache";
 
 export const dynamic = 'force-dynamic';
 
@@ -12,6 +15,7 @@ function getLocalChromePath() {
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
     process.env.LOCALAPPDATA + "\\Google\\Chrome\\Application\\chrome.exe",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
     "/usr/bin/chromium-browser",
   ];
@@ -23,23 +27,18 @@ function getLocalChromePath() {
   return null;
 }
 
-// Fetch page HTML using a real headless browser (bypasses WAF/Cloudflare)
-async function fetchWithBrowser(url) {
-  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || getLocalChromePath();
-  if (!executablePath) {
-    throw new Error("No Chrome browser found. Set PUPPETEER_EXECUTABLE_PATH or install Chrome.");
-  }
-
-  console.log(`[proxy] Using local Chrome: ${executablePath}`);
+// Phase 1: Use Puppeteer ONLY to solve WAF challenges and extract cookies
+async function solveWafChallenge(url, executablePath) {
+  console.log(`[proxy] Phase 1: Solving WAF challenge with Puppeteer...`);
   const browser = await puppeteer.launch({
-    headless: "shell", // Shell mode for low memory; images captured via CDP Network.loadNetworkResource
+    headless: "shell",
     executablePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled", // Hide navigator.webdriver
-      "--disable-features=IsolateOrigins,site-per-process", // Allow cross-origin access
+      "--disable-blink-features=AutomationControlled",
+      "--disable-features=IsolateOrigins,site-per-process",
       "--window-size=1280,900",
     ],
     defaultViewport: { width: 1280, height: 900 },
@@ -49,7 +48,7 @@ async function fetchWithBrowser(url) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
     
-    // Anti-detection: hide Puppeteer from WAFs
+    // Anti-detection
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
       window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
@@ -57,10 +56,8 @@ async function fetchWithBrowser(url) {
       Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
     });
 
-    // Set extra headers to look more like a real browser
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate, br',
       'Sec-Fetch-Dest': 'document',
       'Sec-Fetch-Mode': 'navigate',
       'Sec-Fetch-Site': 'none',
@@ -68,43 +65,25 @@ async function fetchWithBrowser(url) {
       'Upgrade-Insecure-Requests': '1',
     });
 
-    // Start CSS coverage to capture all CSS loaded by the browser
-    // This captures the actual CSS content even through SiteGround's redirect chains
-    await page.coverage.startCSSCoverage();
-
-    // Use networkidle2 (allows 2 open connections) — networkidle0 is too strict
-    // for sites with analytics, websockets, or continuous polling
     await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 1000));
 
-    // Detect security challenges: SiteGround PoW, Cloudflare, or generic
-    // Retry up to 3 times because the challenge page may auto-redirect
+    // Detect security challenge
     let challengeType = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         challengeType = await page.evaluate(() => {
-      const title = (document.title || "").toLowerCase();
-      // SiteGround: "Robot Challenge Screen", has #powCaptcha, uses sgchallenge variable
-      if (title.includes("robot challenge") || document.querySelector("#powCaptcha") || typeof window.sgchallenge !== "undefined") {
-        return "siteground";
-      }
-      // Cloudflare: "Just a moment", has challenge elements
-      if (title.includes("just a moment") || document.querySelector("#challenge-running, #challenge-stage, .cf-challenge-running")) {
-        return "cloudflare";
-      }
-      // Generic: page has very little content and mentions "checking" or "security"
-      const text = document.body?.textContent || "";
-      if (text.length < 500 && (text.includes("Checking") || text.includes("Verifying"))) {
-        return "generic";
-      }
-      return null;
-    });
-        break; // evaluate succeeded, exit retry loop
+          const title = (document.title || "").toLowerCase();
+          if (title.includes("robot challenge") || document.querySelector("#powCaptcha")) return "siteground";
+          if (title.includes("just a moment") || document.querySelector("#challenge-running")) return "cloudflare";
+          const text = document.body?.textContent || "";
+          if (text.length < 500 && (text.includes("Checking") || text.includes("Verifying"))) return "generic";
+          return null;
+        });
+        break;
       } catch (e) {
-        // Context destroyed by auto-navigation, wait and retry
         console.log(`[proxy] Challenge detect attempt ${attempt + 1} failed: ${e.message}`);
         await new Promise(r => setTimeout(r, 2000));
-        // If we exhausted retries, check URL for challenge patterns
         if (attempt === 2) {
           const currentUrl = page.url();
           if (currentUrl.includes('.well-known') || currentUrl.includes('captcha')) {
@@ -113,463 +92,149 @@ async function fetchWithBrowser(url) {
         }
       }
     }
+
     if (challengeType) {
-      console.log(`[proxy] Security challenge detected (${challengeType}) for ${url}, waiting for redirect...`);
-      try {
-        // The challenge solves via Web Workers then redirects (may be 2+ hops)
-        // Wait for navigation chain to complete
-        for (let hop = 0; hop < 5; hop++) {
-          try {
-            await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 });
-          } catch { break; }
-
-          // Check if we've reached the real page
-          const currentUrl = page.url();
-          const currentTitle = await page.title();
-          const isStillChallenge = currentUrl.includes(".well-known") || 
-                                    currentUrl.includes("captcha") ||
-                                    currentUrl.includes("sgcaptcha") ||
-                                    currentTitle.toLowerCase().includes("robot challenge") ||
-                                    currentTitle.includes("Just a moment");
-          if (!isStillChallenge) break;
-          console.log(`[proxy] Still on challenge page (hop ${hop + 1}): ${currentUrl}`);
-        }
-        
-        // Ensure we've actually left the challenge page
-        // The PoW challenge may still be solving — wait for the redirect to complete
-        const waitStart = Date.now();
-        while (Date.now() - waitStart < 30000) {
-          const currentUrl = page.url();
-          if (!currentUrl.includes('.well-known') && !currentUrl.includes('captcha') && !currentUrl.includes('sgcaptcha')) {
-            break;
-          }
-          // Wait for any pending navigation
-          try {
-            await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 5000 });
-          } catch {
-            // Navigation may have already happened, check URL again
-            await new Promise(r => setTimeout(r, 1000));
-          }
-        }
-        
-        console.log(`[proxy] Challenge solved, now at: ${page.url()}`);
-        
-        // CRITICAL: Reload the page now that we have the challenge cookies.
-        // The initial load had CSS/images blocked by per-resource challenges.
-        // With cookies set, the reload will load ALL resources cleanly.
-        console.log(`[proxy] Reloading page with challenge cookies to load CSS/resources...`);
-        
-        // Restart CSS coverage for the clean reload
-        try { await page.coverage.stopCSSCoverage(); } catch {}
-        await page.coverage.startCSSCoverage();
-        
-        // Reload the page to get clean HTML with CSS (images will be proxied via /api/asset)
-        await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
-        await new Promise((r) => setTimeout(r, 2000));
-        
-        // Scroll to trigger lazy-loaded content (CSS and images)
-        await page.evaluate(async () => {
-          const step = Math.min(600, window.innerHeight);
-          const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-          for (let y = 0; y < max; y += step) {
-            window.scrollTo(0, y);
-            await new Promise(r => setTimeout(r, 200));
-          }
-          window.scrollTo(0, 0);
-        });
-        await new Promise(r => setTimeout(r, 1500));
-        
-        console.log(`[proxy] Clean reload complete for ${url}`);
-      } catch (e) {
-        console.log(`[proxy] Security challenge handling error for ${url}: ${e.message}`);
-      }
-    }
-
-    // Wait for body to have real content
-    await page.evaluate(() => {
-      return new Promise((resolve) => {
-        if (document.body && document.body.innerText.length > 100) return resolve();
-        let checks = 0;
-        const interval = setInterval(() => {
-          checks++;
-          if ((document.body && document.body.innerText.length > 100) || checks > 6) {
-            clearInterval(interval);
-            resolve();
-          }
-        }, 500);
-      });
-    });
-
-    // Extract and inline all CSS from the browser's loaded stylesheets.
-    // This solves the CSS rendering problem: the real browser has already
-    // fetched all CSS (with correct referer, cookies, etc.), so we just
-    // grab the parsed rules and inline them into <style> tags.
-    await page.evaluate(async () => {
-      const sheets = Array.from(document.styleSheets);
-      for (const sheet of sheets) {
-        if (!sheet.href) continue; // Skip already-inline styles
+      console.log(`[proxy] Security challenge detected (${challengeType}), waiting for redirect...`);
+      for (let hop = 0; hop < 5; hop++) {
         try {
-          // Try accessing rules directly (same-origin stylesheets)
-          const rules = Array.from(sheet.cssRules).map(r => r.cssText).join('\n');
-          const style = document.createElement('style');
-          style.setAttribute('data-nexoos-browser-inlined', sheet.href);
-          style.textContent = rules;
-          if (sheet.ownerNode && sheet.ownerNode.parentNode) {
-            sheet.ownerNode.parentNode.insertBefore(style, sheet.ownerNode);
-            sheet.ownerNode.remove();
-          }
-        } catch (e) {
-          // Cross-origin stylesheet — fetch from within the page context
-          // (the browser has the correct origin/referer, so this works)
-          try {
-            const res = await fetch(sheet.href);
-            if (res.ok) {
-              const cssText = await res.text();
-              const style = document.createElement('style');
-              style.setAttribute('data-nexoos-browser-inlined', sheet.href);
-              style.textContent = cssText;
-              if (sheet.ownerNode && sheet.ownerNode.parentNode) {
-                sheet.ownerNode.parentNode.insertBefore(style, sheet.ownerNode);
-                sheet.ownerNode.remove();
-              }
-            }
-          } catch (fetchErr) {
-            // Can't access this stylesheet — leave the link tag as-is
-          }
-        }
+          await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 });
+        } catch { break; }
+        const currentUrl = page.url();
+        const currentTitle = await page.title();
+        const isStillChallenge = currentUrl.includes(".well-known") || 
+                                  currentUrl.includes("captcha") ||
+                                  currentTitle.toLowerCase().includes("robot challenge") ||
+                                  currentTitle.includes("Just a moment");
+        if (!isStillChallenge) break;
+        console.log(`[proxy] Still on challenge page (hop ${hop + 1}): ${currentUrl}`);
       }
-    });
 
-    // Dismiss popups, modals, overlays, cookie banners before extracting HTML
-    console.log(`[proxy] Dismissing popups/overlays for ${url}...`);
-    await page.evaluate(() => {
-      // Common popup/modal/overlay selectors
-      const popupSelectors = [
-        // Cookie consent
-        '.cookie-banner', '.cookie-notice', '.cookie-consent', '#cookie-notice',
-        '#cookie-banner', '.cookies-popup', '[class*="cookie"]',
-        '#CybotCookiebotDialog', '.cc-window', '.cc-banner',
-        '#gdpr-consent', '.gdpr-banner', '[class*="gdpr"]',
-        '#onetrust-banner-sdk', '#onetrust-consent-sdk',
-        '.qc-cmp-showing', '#qcCmpButtons',
-        // Newsletter / signup popups
-        '.newsletter-popup', '.popup-overlay', '.email-popup',
-        '[class*="newsletter-popup"]', '[class*="popup-modal"]',
-        // Generic modals/overlays  
-        '.modal-overlay', '.modal-backdrop', '.modal.show',
-        '.overlay', '.popup', '.lightbox-overlay',
-        '[class*="modal-overlay"]', '[class*="popup-overlay"]',
-        // WordPress specific popup plugins
-        '.pum-overlay', '.pum-container', // Popup Maker
-        '.sgpb-popup-overlay', '.sgpb-popup-dialog-main-div', // Popup Builder
-        '.hustle-popup-overlay', '.hustle-popup', // Hustle
-        '.optinmonster-overlay', '#om-holder', // OptinMonster
-        '.elementor-popup-modal', // Elementor popups
-        '#elementor-popup-modal', '.dialog-widget',
-        '.elementor-location-popup',
-        // Notification bars
-        '.notification-bar', '.announcement-bar', '.top-bar-notice',
-        // Chat widgets
-        '.crisp-client', '#hubspot-messages-iframe-container',
-        '#tidio-chat', '.intercom-lightweight-app',
-      ];
-
-      // Close button selectors — try clicking them first
-      const closeSelectors = [
-        '.close-popup', '.popup-close', '.modal-close',
-        '.cookie-close', '.banner-close',
-        '[class*="close"]', '[aria-label="Close"]', '[aria-label="close"]',
-        '.pum-close', '.sgpb-popup-close-button',
-        'button.close', '.btn-close',
-      ];
-
-      // Try clicking close buttons inside popups
-      for (const sel of closeSelectors) {
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 30000) {
+        const currentUrl = page.url();
+        if (!currentUrl.includes('.well-known') && !currentUrl.includes('captcha')) break;
         try {
-          const buttons = document.querySelectorAll(sel);
-          buttons.forEach(btn => {
-            try { btn.click(); } catch {}
-          });
-        } catch {}
-      }
-
-      // Remove popup/overlay elements
-      for (const sel of popupSelectors) {
-        try {
-          const els = document.querySelectorAll(sel);
-          els.forEach(el => el.remove());
-        } catch {}
-      }
-
-      // Remove elements with high z-index that cover the page (likely overlays)
-      const allElements = document.querySelectorAll('*');
-      for (const el of allElements) {
-        try {
-          const style = window.getComputedStyle(el);
-          const zIndex = parseInt(style.zIndex, 10);
-          const position = style.position;
-          const isFixed = position === 'fixed' || position === 'sticky';
-          const isFullScreen = el.offsetWidth > window.innerWidth * 0.8 && 
-                               el.offsetHeight > window.innerHeight * 0.8;
-          const isOverlay = style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)' && 
-                            style.opacity !== '0';
-          
-          // Remove full-screen fixed overlays with high z-index
-          if (isFixed && zIndex > 999 && isFullScreen && isOverlay) {
-            el.remove();
-          }
-          // Remove modal backdrops (semi-transparent full-screen overlays)
-          if (isFixed && isFullScreen && parseFloat(style.opacity) < 0.9 && zIndex > 100) {
-            const bgColor = style.backgroundColor;
-            if (bgColor.includes('rgba') && bgColor.includes('0.')) {
-              el.remove();
-            }
-          }
-        } catch {}
-      }
-
-      // Fix body scroll — popups often set overflow:hidden on body
-      document.body.style.overflow = '';
-      document.body.style.overflowY = '';
-      document.body.style.position = '';
-      document.body.style.height = '';
-      document.documentElement.style.overflow = '';
-      document.documentElement.style.overflowY = '';
-    });
-
-    // Scroll to trigger lazy-loaded content (CSS that loads on scroll)
-    // Images are NOT inlined as data URIs — they will be proxied through /api/asset
-    // by proxyAssetUrls() and the client-side script. This keeps the HTML response
-    // This keeps the HTML response small and lets images load in parallel.
-    console.log(`[proxy] Scrolling to trigger lazy content for ${url}...`);
-    await page.evaluate(async () => {
-      const step = Math.max(window.innerHeight, 500);
-      const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-      for (let y = 0; y < max; y += step) {
-        window.scrollTo(0, y);
-        await new Promise(r => setTimeout(r, 200));
-      }
-      window.scrollTo(0, 0);
-    });
-    // Wait for lazy content to start loading
-    await new Promise(r => setTimeout(r, 1500));
-
-    // Capture the page HTML first
-    let html = await page.content();
-
-    // ===== IMAGE INLINING via CDP Network.loadNetworkResource =====
-    // CDP captures image data BEFORE the CSS reload (which may overwrite html).
-    // The actual URL replacements are applied AFTER CSS Coverage processing.
-    let imageMap = {};
-    try {
-      const cdp = await page.createCDPSession();
-      
-      // Get all image URLs from the DOM
-      const imageUrls = await page.evaluate(() => {
-        const urls = [];
-        document.querySelectorAll('img[src]').forEach(img => {
-          const src = img.getAttribute('src');
-          if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
-            try { urls.push(new URL(src, window.location.href).href); } catch {}
-          }
-        });
-        return [...new Set(urls)]; // Deduplicate
-      });
-
-      console.log(`[proxy] Found ${imageUrls.length} image URLs to inline via CDP`);
-
-      let converted = 0, failed = 0;
-      const MAX_TOTAL = 15 * 1024 * 1024;
-      let totalSize = 0;
-
-      const withTimeout = (promise, ms) => Promise.race([
-        promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
-      ]);
-
-      let frameId;
-      try {
-        const { frameTree } = await cdp.send('Page.getFrameTree');
-        frameId = frameTree.frame.id;
-      } catch {
-        frameId = page.mainFrame()._id;
-      }
-
-      for (const imgUrl of imageUrls) {
-        if (totalSize > MAX_TOTAL) break;
-        try {
-          const cdpResult = await withTimeout(
-            cdp.send('Network.loadNetworkResource', {
-              url: imgUrl,
-              frameId,
-              options: { disableCache: false, includeCredentials: true }
-            }),
-            5000
-          );
-
-          if (!cdpResult.resource || !cdpResult.resource.success || !cdpResult.resource.stream) {
-            failed++;
-            continue;
-          }
-
-          const stream = cdpResult.resource.stream;
-          let data = '';
-          let base64Encoded = false;
-          try {
-            let eof = false;
-            let readCount = 0;
-            while (!eof && readCount < 50) {
-              const chunk = await withTimeout(
-                cdp.send('IO.read', { handle: stream, size: 1024 * 1024 }),
-                3000
-              );
-              data += chunk.data;
-              base64Encoded = chunk.base64Encoded;
-              eof = chunk.eof;
-              readCount++;
-            }
-            await cdp.send('IO.close', { handle: stream }).catch(() => {});
-          } catch {
-            await cdp.send('IO.close', { handle: stream }).catch(() => {});
-            failed++;
-            continue;
-          }
-
-          if (!data || data.length === 0) { failed++; continue; }
-
-          const headers = cdpResult.resource.headers || {};
-          let mime = headers['content-type'] || headers['Content-Type'] || 'image/png';
-          if (mime.includes(';')) mime = mime.split(';')[0].trim();
-          if (mime.includes('text/html')) { failed++; continue; }
-
-          const b64 = base64Encoded ? data : Buffer.from(data, 'binary').toString('base64');
-          imageMap[imgUrl] = `data:${mime};base64,${b64}`;
-          totalSize += b64.length;
-          converted++;
+          await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 5000 });
         } catch {
-          failed++;
+          await new Promise(r => setTimeout(r, 1000));
         }
       }
-
-      console.log(`[proxy] Image inlining: ${converted} converted, ${failed} failed (${Math.round(totalSize / 1024)}KB total)`);
-      await cdp.detach().catch(() => {});
-    } catch (e) {
-      console.log(`[proxy] Image inlining failed: ${e.message}`);
-    }
-    
-    // Stop CSS coverage and use captured CSS to inline stylesheets
-    // Coverage API captures the full CSS text for every stylesheet loaded by the browser,
-    // even through SiteGround's WAF challenge redirects
-    let coverageEntries = [];
-    try {
-      coverageEntries = await page.coverage.stopCSSCoverage();
-    } catch {}
-    console.log(`[proxy] CSS Coverage captured ${coverageEntries.length} stylesheets`);
-    
-    if (coverageEntries.length > 0) {
-      // Collect ALL valid CSS from coverage (inline styles + external sheets)
-      let allCSS = [];
-      for (const entry of coverageEntries) {
-        if (entry.text && entry.text.length > 0 && !entry.text.trimStart().startsWith('<')) {
-          allCSS.push(entry.text);
-        }
-      }
-      console.log(`[proxy] CSS Coverage: ${allCSS.length}/${coverageEntries.length} valid CSS blocks`);
-      
-      // If most coverage entries were HTML (challenge pages), the CSS didn't load properly.
-      // Do a clean reload to let the browser load CSS with existing cookies.
-      if (allCSS.length < coverageEntries.length * 0.5 && coverageEntries.length > 5) {
-        console.log(`[proxy] Most CSS was challenged, doing clean reload...`);
-        try {
-          await page.coverage.startCSSCoverage();
-          await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
-          await new Promise(r => setTimeout(r, 2000));
-          
-          const reloadEntries = await page.coverage.stopCSSCoverage();
-          allCSS = [];
-          for (const entry of reloadEntries) {
-            if (entry.text && entry.text.length > 0 && !entry.text.trimStart().startsWith('<')) {
-              allCSS.push(entry.text);
-            }
-          }
-          
-          // Scroll to trigger lazy images on the clean page
-          await page.evaluate(async () => {
-            const step = Math.min(600, window.innerHeight);
-            const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-            for (let y = 0; y < max; y += step) {
-              window.scrollTo(0, y);
-              await new Promise(r => setTimeout(r, 300));
-            }
-            window.scrollTo(0, 0);
-          });
-          
-          // Wait for images triggered by scrolling to finish loading
-          await page.waitForNetworkIdle({ timeout: 5000, idleTime: 1000 }).catch(() => {});
-          
-          // Re-capture the HTML after clean reload
-          html = await page.content();
-          console.log(`[proxy] After reload: ${allCSS.length}/${reloadEntries.length} valid CSS blocks`);
-        } catch (e) {
-          console.log(`[proxy] CSS reload failed: ${e.message}`);
-        }
-      }
-      
-      if (allCSS.length > 0) {
-        // Inject all captured CSS as a single style block in <head>
-        const combinedCSS = `<style data-nexoos-coverage="true">${allCSS.join('\n')}</style>`;
-        if (/<head[^>]*>/i.test(html)) {
-          html = html.replace(/<head[^>]*>/i, `$&${combinedCSS}`);
-        } else {
-          html = combinedCSS + html;
-        }
-      }
-      
-      // Remove external stylesheet links — their CSS is now inlined via coverage
-      // or was already inlined by Elementor/WordPress JS execution
-      // Keep Google Fonts links (loaded from CDN, not affected by WAF)
-      html = html.replace(/<link[^>]*rel=["']stylesheet["'][^>]*>/gi, (tag) => {
-        if (tag.includes('fonts.googleapis.com') || tag.includes('fonts.gstatic.com')) {
-          return tag; // Keep Google Fonts
-        }
-        return ''; // Remove — CSS already inlined
-      });
-      
-      console.log(`[proxy] CSS Coverage: injected ${allCSS.length} CSS blocks, removed external links`);
+      console.log(`[proxy] Challenge solved, now at: ${page.url()}`);
     }
 
-    // Apply image data URI replacements to the final HTML
-    // This MUST happen after CSS Coverage processing, because the CSS reload
-    // can overwrite `html` with page.content() which loses any previous replacements.
-    if (Object.keys(imageMap).length > 0) {
-      for (const [url, dataUri] of Object.entries(imageMap)) {
-        html = html.split(url).join(dataUri);
-      }
-      console.log(`[proxy] Applied ${Object.keys(imageMap).length} image replacements to final HTML`);
+    // Extract cookies
+    const cookies = await page.cookies();
+    const domain = new URL(url).hostname;
+    if (cookies.length > 0) {
+      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+      setCookiesForDomain(domain, cookieStr);
     }
-
-    // Images now use direct URLs from the original domain.
-    // The browser loads them natively (cross-origin <img> is always allowed).
-    // If an image fails (WAF/hotlink), the client-side onerror handler
-    // retries through /api/asset as a fallback. No server-side capture needed.
-
-    // Extract and cache cookies from the browser session
-    try {
-      const cookies = await page.cookies();
-      if (cookies.length > 0) {
-        const domain = new URL(url).hostname;
-        const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-        setCookiesForDomain(domain, cookieStr);
-      }
-    } catch {}
 
     await browser.close();
-    return html;
+    console.log(`[proxy] Phase 1 complete: ${cookies.length} cookies extracted, browser closed`);
+    return { cookies, challengeType };
   } catch (error) {
     await browser.close().catch(() => {});
     throw error;
   }
 }
+
+// Phase 2: Use SingleFile CLI to capture the complete page with all resources embedded
+function captureWithSingleFile(url, cookies, executablePath) {
+  console.log(`[proxy] Phase 2: Capturing page with SingleFile CLI...`);
+  
+  // Write cookies to a temp file for SingleFile
+  const cookieFilePath = path.join(os.tmpdir(), `nexoos-cookies-${Date.now()}.json`);
+  const cookieData = cookies.map(c => ({
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    path: c.path || '/',
+    expires: c.expires || -1,
+    httpOnly: c.httpOnly || false,
+    secure: c.secure || false,
+    sameSite: c.sameSite || 'Lax',
+    url: url,
+  }));
+  fs.writeFileSync(cookieFilePath, JSON.stringify(cookieData));
+  
+  // Find SingleFile CLI binary
+  const singleFileBin = path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'single-file.cmd' : 'single-file');
+  
+  const args = [
+    url,
+    '--dump-content',
+    '--browser-executable-path', executablePath,
+    '--browser-headless',
+    '--browser-cookies-file', cookieFilePath,
+    '--browser-width', '1280',
+    '--browser-height', '900',
+    '--browser-load-max-time', '45000',
+    '--browser-capture-max-time', '45000',
+    '--browser-wait-until', 'networkIdle',
+    '--browser-wait-delay', '1500',
+    '--load-deferred-images',
+    '--load-deferred-images-dispatch-scroll-event',
+    '--load-deferred-images-max-idle-time', '3000',
+    '--remove-hidden-elements', 'false',
+    '--remove-unused-styles', 'false',
+    '--remove-unused-fonts', 'false',
+    '--remove-alternative-fonts', 'false',
+    '--remove-alternative-medias', 'false',
+    '--remove-alternative-images', 'false',
+    '--block-scripts', 'true',
+    '--block-audios', 'true',
+    '--block-videos', 'true',
+    '--compress-HTML', 'false',
+    '--insert-meta-CSP', 'false',
+    '--insert-single-file-comment', 'false',
+    '--remove-saved-date',
+    '--max-resource-size', '20',
+    '--browser-arg', '--no-sandbox',
+    '--browser-arg', '--disable-setuid-sandbox',
+    '--browser-arg', '--disable-dev-shm-usage',
+    '--browser-arg', '--disable-blink-features=AutomationControlled',
+  ];
+  
+  return new Promise((resolve, reject) => {
+    execFile(singleFileBin, args, {
+      maxBuffer: 100 * 1024 * 1024, // 100MB for large pages with embedded images
+      timeout: 90000,
+    }, (error, stdout, stderr) => {
+      // Clean up temp cookie file
+      try { fs.unlinkSync(cookieFilePath); } catch {}
+      
+      if (error) {
+        console.log(`[proxy] SingleFile error: ${error.message}`);
+        console.log(`[proxy] SingleFile stderr: ${(stderr || '').substring(0, 500)}`);
+        reject(error);
+        return;
+      }
+      
+      console.log(`[proxy] SingleFile captured ${Math.round(stdout.length / 1024)}KB of HTML`);
+      if (stderr) console.log(`[proxy] SingleFile info: ${stderr.substring(0, 200)}`);
+      resolve(stdout);
+    });
+  });
+}
+
+// Main entry: solve WAF + capture with SingleFile
+async function fetchWithBrowser(url) {
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || getLocalChromePath();
+  if (!executablePath) {
+    throw new Error("No Chrome browser found. Set PUPPETEER_EXECUTABLE_PATH or install Chrome.");
+  }
+  console.log(`[proxy] Using Chrome: ${executablePath}`);
+
+  // Phase 1: Solve WAF challenge with Puppeteer, extract cookies
+  const { cookies } = await solveWafChallenge(url, executablePath);
+  
+  // Phase 2: Capture complete page with SingleFile CLI (all resources embedded)
+  const html = await captureWithSingleFile(url, cookies, executablePath);
+  
+  return html;
+}
+
 
 // Detect if HTML is a WAF/CDN block page (Cloudflare, SiteGround, Sucuri, etc.)
 function isCloudflareBlock(html) {
