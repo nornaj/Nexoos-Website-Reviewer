@@ -922,14 +922,7 @@ export async function GET(request) {
         html = await fetchWithBrowser(url);
         usedBrowser = true;
         
-        // Verify Puppeteer didn't also get stuck on a challenge page
-        // BUT: if CSS Coverage captured content, the challenge was solved — don't discard
-        const hasCSSCoverage = html && html.includes('data-nexoos-coverage="true"');
-        if (html && !hasCSSCoverage && isChallengePage(html, 0)) {
-          console.log(`[proxy] Puppeteer also got a challenge page for ${url}`);
-          html = buildBlockedErrorPage(url, 'This website has bot protection that could not be bypassed automatically.');
-          usedBrowser = false;
-        }
+        // SingleFile captures the full page with WAF cookies - output is trusted
       } catch (browserError) {
         console.log(`[proxy] Puppeteer also failed: ${browserError.message}`);
         // Check if quick fetch got any usable HTML (not a block/challenge page)
