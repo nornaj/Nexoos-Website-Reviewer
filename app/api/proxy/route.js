@@ -32,7 +32,7 @@ async function fetchWithBrowser(url) {
 
   console.log(`[proxy] Using local Chrome: ${executablePath}`);
   const browser = await puppeteer.launch({
-    headless: "shell", // Use shell mode for lower memory (stealth plugin still works)
+    headless: true, // Full rendering mode — images load with proper Sec-Fetch-Dest:image headers
     executablePath,
     args: [
       "--no-sandbox",
@@ -354,63 +354,87 @@ async function fetchWithBrowser(url) {
     // Wait for lazy content to start loading
     await new Promise(r => setTimeout(r, 1500));
 
-    // ===== IMAGE INLINING: Convert images to base64 data URIs inside the page context =====
-    // Fetching from inside page.evaluate() inherits ALL WAF cookies (same-origin request).
-    // This bypasses CORS, WAF challenges, and headless:shell canvas limitations.
-    // Images become self-contained data URIs — no cross-origin requests needed on the client.
+    // ===== IMAGE INLINING: Convert images to base64 data URIs =====
+    // With headless:true, images are loaded normally by the browser's renderer.
+    // SiteGround WAF allows these (Sec-Fetch-Dest: image).
+    // We wait for images to finish loading, then read them via canvas.
+    // Canvas works in headless:true because images are actually rendered.
     try {
+      // Wait for all images to finish loading
+      await page.evaluate(async () => {
+        const images = Array.from(document.querySelectorAll('img'));
+        await Promise.all(images.map(img => {
+          if (img.complete) return Promise.resolve();
+          return new Promise(resolve => {
+            img.onload = resolve;
+            img.onerror = resolve;
+            setTimeout(resolve, 5000); // Max 5s per image
+          });
+        }));
+      });
+
       const inlineResult = await page.evaluate(async () => {
         const images = Array.from(document.querySelectorAll('img'));
         let converted = 0, failed = 0, skipped = 0;
-        const MAX_SIZE = 2 * 1024 * 1024; // Skip images > 2MB
 
-        const fetchAsBase64 = async (img) => {
+        const processImage = async (img) => {
           const src = img.src;
           if (!src || src.startsWith('data:') || !src.startsWith('http')) {
             skipped++;
             return;
           }
 
+          // Strategy 1: Canvas — read already-rendered image pixels (works in headless:true)
+          try {
+            if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.naturalWidth;
+              canvas.height = img.naturalHeight;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0);
+              const srcLower = src.toLowerCase();
+              let mime = 'image/png';
+              if (srcLower.includes('.jpg') || srcLower.includes('.jpeg')) mime = 'image/jpeg';
+              else if (srcLower.includes('.webp')) mime = 'image/webp';
+              const dataUrl = canvas.toDataURL(mime, 0.92);
+              if (dataUrl && dataUrl.length > 100) {
+                img.src = dataUrl;
+                img.removeAttribute('onerror');
+                if (img.hasAttribute('srcset')) img.removeAttribute('srcset');
+                converted++;
+                return;
+              }
+            }
+          } catch {}
+
+          // Strategy 2: Fetch with abort timeout (fallback for SVGs and failed canvas)
           try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout per image
-
+            const timeoutId = setTimeout(() => controller.abort(), 4000);
             const response = await fetch(src, { signal: controller.signal });
             clearTimeout(timeoutId);
-
             if (!response.ok) { failed++; return; }
-
-            // Check content-length before downloading large files
-            const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
-            if (contentLength > MAX_SIZE) { skipped++; return; }
-
             const blob = await response.blob();
-            if (blob.size === 0 || blob.size > MAX_SIZE || blob.type.includes('text/html')) {
+            if (blob.size === 0 || blob.size > 2 * 1024 * 1024 || blob.type.includes('text/html')) {
               failed++;
               return;
             }
-
             const dataUrl = await new Promise((resolve, reject) => {
               const reader = new FileReader();
               reader.onloadend = () => resolve(reader.result);
               reader.onerror = reject;
               reader.readAsDataURL(blob);
             });
-
             img.src = dataUrl;
             img.removeAttribute('onerror');
-            // Also clear srcset so browser doesn't try to load alternative sources
             if (img.hasAttribute('srcset')) img.removeAttribute('srcset');
             converted++;
-          } catch (error) {
+          } catch {
             failed++;
-            // Leave original absolute URL so client-side proxy can still try
           }
         };
 
-        // Process all images concurrently
-        await Promise.all(images.map(img => fetchAsBase64(img)));
-
+        await Promise.all(images.map(img => processImage(img)));
         return { converted, failed, skipped };
       });
 
