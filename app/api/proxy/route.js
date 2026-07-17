@@ -1225,8 +1225,9 @@ export async function GET(request) {
         usedBrowser = true;
         
         // Verify Puppeteer didn't also get stuck on a challenge page
-        // (only check for challenge pages, NOT generic isCloudflareBlock which can false-positive on real content)
-        if (html && isChallengePage(html, 0)) {
+        // BUT: if CSS Coverage captured content, the challenge was solved — don't discard
+        const hasCSSCoverage = html && html.includes('data-nexoos-coverage="true"');
+        if (html && !hasCSSCoverage && isChallengePage(html, 0)) {
           console.log(`[proxy] Puppeteer also got a challenge page for ${url}`);
           html = buildBlockedErrorPage(url, 'This website has bot protection that could not be bypassed automatically.');
           usedBrowser = false;
