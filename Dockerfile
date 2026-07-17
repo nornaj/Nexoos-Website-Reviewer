@@ -61,6 +61,12 @@ RUN npm ci --ignore-scripts
 # Copy the rest of the application
 COPY . .
 
+# Railway injects these as build args — Next.js needs NEXT_PUBLIC_* at build time
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+ENV NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+
 # Build the Next.js application
 RUN npm run build
 
