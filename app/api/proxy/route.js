@@ -1007,6 +1007,20 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
       width: 0 !important;
       height: 0 !important;
     }
+    /* JS-dependent carousels/sliders: make items visible without JavaScript */
+    /* Slick slider */
+    .slick-track { display: flex !important; }
+    .slick-slide { display: block !important; flex-shrink: 0; }
+    .slick-list { overflow: hidden !important; }
+    /* JetElements carousel (uses Slick) */
+    .jet-carousel .slick-track { display: flex !important; }
+    .jet-carousel .slick-slide { display: block !important; width: auto !important; flex: 0 0 33.33%; max-width: 33.33%; }
+    /* Swiper carousel (Elementor) */
+    .swiper-wrapper { display: flex !important; }
+    .swiper-slide { display: block !important; flex-shrink: 0 !important; }
+    /* Elementor carousel/slider */
+    .elementor-slides .swiper-slide { display: block !important; }
+    .elementor-image-carousel .swiper-slide { display: block !important; }
   </style>`;
 
   // Everything goes INSIDE <head> to preserve <!DOCTYPE> (prevents quirks mode)
