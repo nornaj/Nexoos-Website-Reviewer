@@ -164,31 +164,11 @@ async function fetchWithBrowser(url) {
         try { await page.coverage.stopCSSCoverage(); } catch {}
         await page.coverage.startCSSCoverage();
         
-        // Set up CDP to capture image response bodies during reload
-        // This bypasses canvas CORS tainting — we get raw network data
-        const cdp = await page.createCDPSession();
-        const capturedImages = new Map();
-        await cdp.send('Network.enable');
-        cdp.on('Network.responseReceived', async (event) => {
-          const { requestId, response } = event;
-          const contentType = response.mimeType || '';
-          if (contentType.startsWith('image/') && response.status === 200) {
-            try {
-              const body = await cdp.send('Network.getResponseBody', { requestId });
-              if (body.base64Encoded) {
-                capturedImages.set(response.url, `data:${contentType};base64,${body.body}`);
-              } else {
-                const b64 = Buffer.from(body.body).toString('base64');
-                capturedImages.set(response.url, `data:${contentType};base64,${b64}`);
-              }
-            } catch {}
-          }
-        });
-        
+        // Reload the page to get clean HTML with CSS (images will be proxied via /api/asset)
         await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
         await new Promise((r) => setTimeout(r, 2000));
         
-        // Scroll to trigger lazy images
+        // Scroll to trigger lazy-loaded content (CSS and images)
         await page.evaluate(async () => {
           const step = Math.min(600, window.innerHeight);
           const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
@@ -199,39 +179,6 @@ async function fetchWithBrowser(url) {
           window.scrollTo(0, 0);
         });
         await new Promise(r => setTimeout(r, 1500));
-        
-        await cdp.send('Network.disable');
-        await cdp.detach();
-        
-        console.log(`[proxy] CDP captured ${capturedImages.size} images during reload`);
-        
-        // Inject captured images as data URIs into the page
-        if (capturedImages.size > 0) {
-          const imageMap = Object.fromEntries(capturedImages);
-          await page.evaluate((imgMap) => {
-            document.querySelectorAll('img[src]').forEach(img => {
-              const src = img.getAttribute('src');
-              if (src && imgMap[src]) {
-                img.setAttribute('src', imgMap[src]);
-                img.removeAttribute('srcset');
-                img.removeAttribute('data-srcset');
-              }
-            });
-            // Also check srcset-only images
-            document.querySelectorAll('img[srcset]').forEach(img => {
-              const srcset = img.getAttribute('srcset');
-              if (srcset) {
-                for (const [url, dataUri] of Object.entries(imgMap)) {
-                  if (srcset.includes(url)) {
-                    img.setAttribute('src', dataUri);
-                    img.removeAttribute('srcset');
-                    break;
-                  }
-                }
-              }
-            });
-          }, imageMap);
-        }
         
         console.log(`[proxy] Clean reload complete for ${url}`);
       } catch (e) {
@@ -391,11 +338,11 @@ async function fetchWithBrowser(url) {
       document.documentElement.style.overflowY = '';
     });
 
-    // Convert images to inline data URIs from within the browser
-    // (the browser has the SiteGround cookies, so it can fetch assets)
-    console.log(`[proxy] Converting images to inline data URIs for ${url}...`);
-
-    // Trigger lazy-loaded images by scrolling through the page
+    // Scroll to trigger lazy-loaded content (CSS that loads on scroll)
+    // Images are NOT inlined as data URIs — they will be proxied through /api/asset
+    // by proxyAssetUrls() and the client-side script. This keeps the HTML response
+    // well under Vercel's 4.5MB response body limit.
+    console.log(`[proxy] Scrolling to trigger lazy content for ${url}...`);
     await page.evaluate(async () => {
       const step = Math.max(window.innerHeight, 500);
       const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
@@ -405,162 +352,8 @@ async function fetchWithBrowser(url) {
       }
       window.scrollTo(0, 0);
     });
-    // Wait for lazy images to start loading
+    // Wait for lazy content to start loading
     await new Promise(r => setTimeout(r, 1500));
-
-    const imgStats = await page.evaluate(async () => {
-      // Cache: url -> dataUri (avoids re-fetching the same URL)
-      const cache = new Map();
-
-      async function fetchAsDataUri(url, timeout = 8000) {
-        if (!url || url.startsWith('data:') || url.startsWith('blob:')) return null;
-        if (cache.has(url)) return cache.get(url);
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), timeout);
-          const res = await fetch(url, { signal: controller.signal, credentials: 'include' });
-          clearTimeout(timer);
-          if (!res.ok) { cache.set(url, null); return null; }
-          const blob = await res.blob();
-          if (blob.size > 4 * 1024 * 1024) { cache.set(url, null); return null; }
-          const result = await new Promise((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror = () => resolve(null);
-            reader.readAsDataURL(blob);
-          });
-          cache.set(url, result);
-          return result;
-        } catch { cache.set(url, null); return null; }
-      }
-
-      // Canvas-based image extraction: draw already-rendered images to canvas
-      // This works even when fetch() is blocked by WAF, because the browser
-      // already loaded the images during page render
-      function imgToDataUri(img) {
-        try {
-          if (!img.complete || img.naturalWidth === 0) return null;
-          const canvas = document.createElement('canvas');
-          canvas.width = img.naturalWidth;
-          canvas.height = img.naturalHeight;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0);
-          return canvas.toDataURL('image/png');
-        } catch { return null; } // CORS-tainted canvas will throw
-      }
-
-      const batchSize = 6;
-      async function processBatch(items, handler) {
-        for (let i = 0; i < items.length; i += batchSize) {
-          await Promise.allSettled(items.slice(i, i + batchSize).map(handler));
-        }
-      }
-      // 1. Convert <img> elements — try canvas first, then fetch as fallback
-      const imgs = Array.from(document.querySelectorAll('img[src]'));
-      let stats = { total: 0, canvas: 0, fetch: 0, failed: 0, skipped: 0 };
-      await processBatch(imgs, async (img) => {
-        const src = img.getAttribute('src');
-        if (!src || src.startsWith('data:') || src.startsWith('blob:')) { stats.skipped++; return; }
-        stats.total++;
-        
-        // Try canvas extraction first (uses already-rendered image)
-        let dataUri = imgToDataUri(img);
-        if (dataUri) { stats.canvas++; }
-        
-        // Fallback to fetch if canvas failed (CORS or not loaded)
-        if (!dataUri) {
-          dataUri = await fetchAsDataUri(src);
-          if (dataUri) { stats.fetch++; }
-        }
-        
-        if (dataUri) {
-          img.setAttribute('src', dataUri);
-          img.removeAttribute('srcset');
-          img.removeAttribute('data-srcset');
-        } else {
-          stats.failed++;
-        }
-      });
-
-      // 2. Convert lazy-loaded images (only if src is missing/placeholder)
-      const lazyImgs = Array.from(document.querySelectorAll('img[data-src], img[data-lazy-src], img[data-original]'));
-      await processBatch(lazyImgs, async (img) => {
-        const currentSrc = img.getAttribute('src') || '';
-        if (currentSrc.startsWith('data:image') && currentSrc.length > 100) return; // Already converted
-        const lazySrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original');
-        if (!lazySrc || lazySrc.startsWith('data:')) return;
-        const dataUri = await fetchAsDataUri(lazySrc);
-        if (dataUri) {
-          img.setAttribute('src', dataUri);
-          img.removeAttribute('srcset');
-          img.removeAttribute('data-srcset');
-        }
-      });
-
-      // 3. Convert <picture> <source> srcset
-      const sources = Array.from(document.querySelectorAll('picture source[srcset]'));
-      await processBatch(sources, async (source) => {
-        const srcset = source.getAttribute('srcset');
-        if (!srcset || srcset.startsWith('data:')) return;
-        const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
-        const dataUri = await fetchAsDataUri(firstUrl);
-        if (dataUri) {
-          source.setAttribute('srcset', dataUri);
-        }
-      });
-
-      // 4. Convert <video poster>
-      const videos = Array.from(document.querySelectorAll('video[poster]'));
-      await processBatch(videos, async (video) => {
-        const poster = video.getAttribute('poster');
-        if (!poster || poster.startsWith('data:')) return;
-        const dataUri = await fetchAsDataUri(poster);
-        if (dataUri) {
-          video.setAttribute('poster', dataUri);
-        }
-      });
-
-      // 5. Convert computed CSS background images (catches class-based backgrounds)
-      const allEls = Array.from(document.querySelectorAll('div, section, article, header, footer, figure, span, a, li, main, aside, nav, picture, p'));
-      const bgItems = [];
-      for (const el of allEls) {
-        try {
-          const bg = window.getComputedStyle(el).backgroundImage;
-          if (bg && bg !== 'none' && bg.includes('url(') && !bg.includes('data:')) {
-            bgItems.push({ el, bg });
-          }
-        } catch {}
-      }
-      await processBatch(bgItems, async ({ el, bg }) => {
-        // Match ANY url() — computed styles always return absolute URLs
-        const urlRegex = /url\(\s*["']?((?:https?:\/\/|\/\/)[^"'\)\s]+)["']?\s*\)/gi;
-        let newBg = bg;
-        let changed = false;
-        let match;
-        while ((match = urlRegex.exec(bg)) !== null) {
-          let imgUrl = match[1];
-          // Protocol-relative URLs
-          if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
-          const dataUri = await fetchAsDataUri(imgUrl);
-          if (dataUri) {
-            newBg = newBg.replace(match[0], `url(${dataUri})`);
-            changed = true;
-          }
-        }
-        if (changed) el.style.backgroundImage = newBg;
-      });
-
-      // 6. Handle data-bg attributes (common lazy-load pattern)
-      const dataBgEls = Array.from(document.querySelectorAll('[data-bg], [data-background]'));
-      await processBatch(dataBgEls, async (el) => {
-        const bgUrl = el.getAttribute('data-bg') || el.getAttribute('data-background');
-        if (!bgUrl || bgUrl.startsWith('data:')) return;
-        const dataUri = await fetchAsDataUri(bgUrl);
-        if (dataUri) el.style.backgroundImage = `url(${dataUri})`;
-      });
-      return stats;
-    });
-    console.log(`[proxy] Image conversion for ${url}: ${JSON.stringify(imgStats)}`);
 
     let html = await page.content();
     
@@ -610,67 +403,8 @@ async function fetchWithBrowser(url) {
             }
             window.scrollTo(0, 0);
           });
-          await new Promise(r => setTimeout(r, 1500));
           
-          // Re-run image conversion on the clean, authenticated page
-          console.log(`[proxy] Re-extracting images after CSS reload...`);
-          const reloadImgStats = await page.evaluate(async () => {
-            const cache = new Map();
-            async function fetchAsDataUri(url, timeout = 8000) {
-              if (!url || url.startsWith('data:') || url.startsWith('blob:')) return null;
-              if (cache.has(url)) return cache.get(url);
-              try {
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), timeout);
-                const res = await fetch(url, { signal: controller.signal, credentials: 'include' });
-                clearTimeout(timer);
-                if (!res.ok) { cache.set(url, null); return null; }
-                const blob = await res.blob();
-                if (blob.size > 4 * 1024 * 1024) { cache.set(url, null); return null; }
-                const result = await new Promise((resolve) => {
-                  const reader = new FileReader();
-                  reader.onloadend = () => resolve(reader.result);
-                  reader.onerror = () => resolve(null);
-                  reader.readAsDataURL(blob);
-                });
-                cache.set(url, result);
-                return result;
-              } catch { cache.set(url, null); return null; }
-            }
-            function imgToDataUri(img) {
-              try {
-                if (!img.complete || img.naturalWidth === 0) return null;
-                const canvas = document.createElement('canvas');
-                canvas.width = img.naturalWidth;
-                canvas.height = img.naturalHeight;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0);
-                return canvas.toDataURL('image/webp', 0.85);
-              } catch { return null; }
-            }
-            const imgs = Array.from(document.querySelectorAll('img[src]'));
-            let stats = { total: 0, canvas: 0, fetch: 0, failed: 0 };
-            for (const img of imgs) {
-              const src = img.getAttribute('src');
-              if (!src || src.startsWith('data:') || src.startsWith('blob:')) continue;
-              stats.total++;
-              let dataUri = imgToDataUri(img);
-              if (dataUri) { stats.canvas++; }
-              if (!dataUri) {
-                dataUri = await fetchAsDataUri(src);
-                if (dataUri) { stats.fetch++; }
-              }
-              if (dataUri) {
-                img.setAttribute('src', dataUri);
-                img.removeAttribute('srcset');
-                img.removeAttribute('data-srcset');
-              } else { stats.failed++; }
-            }
-            return stats;
-          });
-          console.log(`[proxy] Post-reload image stats: ${JSON.stringify(reloadImgStats)}`);
-          
-          // Re-capture the HTML after reload + image conversion
+          // Re-capture the HTML after clean reload
           html = await page.content();
           console.log(`[proxy] After reload: ${allCSS.length}/${reloadEntries.length} valid CSS blocks`);
         } catch (e) {

@@ -55,7 +55,7 @@ export async function GET(request) {
           return new NextResponse(buffer, {
             headers: {
               "Content-Type": ct2,
-              "Cache-Control": "public, max-age=86400",
+              "Cache-Control": "public, max-age=300",
               "Access-Control-Allow-Origin": "*",
               "Cross-Origin-Resource-Policy": "cross-origin",
             },
@@ -79,7 +79,7 @@ export async function GET(request) {
     return new NextResponse(buffer, {
       headers: {
         "Content-Type": contentType || "application/octet-stream",
-        "Cache-Control": "public, max-age=86400",
+        "Cache-Control": "public, max-age=300",
         "Access-Control-Allow-Origin": "*",
         "Cross-Origin-Resource-Policy": "cross-origin",
       },

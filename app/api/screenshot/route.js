@@ -52,16 +52,16 @@ export async function GET(request) {
 
   const cachePath = getCachePath(url, fullPage);
 
-  // Return cached screenshot if exists and less than 24h old
+  // Return cached screenshot if exists and less than 30 minutes old
   if (fs.existsSync(cachePath)) {
     const stat = fs.statSync(cachePath);
     const age = Date.now() - stat.mtimeMs;
-    if (age < 24 * 60 * 60 * 1000) {
+    if (age < 30 * 60 * 1000) {
       const buffer = fs.readFileSync(cachePath);
       return new NextResponse(buffer, {
         headers: {
           "Content-Type": "image/png",
-          "Cache-Control": "public, max-age=86400",
+          "Cache-Control": "public, max-age=300",
         },
       });
     }
@@ -156,7 +156,7 @@ export async function GET(request) {
     return new NextResponse(screenshot, {
       headers: {
         "Content-Type": "image/png",
-        "Cache-Control": "public, max-age=86400",
+        "Cache-Control": "public, max-age=300",
       },
     });
   } catch (error) {
