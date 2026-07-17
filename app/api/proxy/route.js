@@ -1135,14 +1135,16 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     // Also handle srcset
     var srcset = img.getAttribute('srcset');
     if (srcset && !srcset.includes('/api/asset')) {
-      var entries = srcset.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+      var entries = srcset.split(',');
       img.setAttribute('srcset', entries.map(function(entry) {
-        return entry.replace(/(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/, function(url) {
-          if (url.includes('/api/asset')) return url;
-          if (!shouldProxyUrl(url)) return url;
-          var p = proxyUrl(url);
-          return p || url;
-        });
+        var trimmed = entry.trim();
+        var parts = trimmed.split(/\s+/);
+        var url = parts[0];
+        if (!url || url.includes('/api/asset')) return entry;
+        if (!shouldProxyUrl(url)) return entry;
+        var p = proxyUrl(url);
+        if (p) { parts[0] = p; return parts.join(' '); }
+        return entry;
       }).join(','));
     }
     // Handle data-src (lazy loading)
@@ -1185,13 +1187,15 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
       el.dataset.nexoosRetried = '1';
       var srcset = el.getAttribute('srcset');
       if (srcset && !srcset.includes('/api/asset')) {
-        var entries = srcset.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+        var entries = srcset.split(',');
         el.setAttribute('srcset', entries.map(function(entry) {
-          return entry.replace(/(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/, function(url) {
-            if (url.includes('/api/asset')) return url;
-            var p = proxyUrl(url);
-            return p || url;
-          });
+          var trimmed = entry.trim();
+          var parts = trimmed.split(/\s+/);
+          var url = parts[0];
+          if (!url || url.includes('/api/asset')) return entry;
+          var p = proxyUrl(url);
+          if (p) { parts[0] = p; return parts.join(' '); }
+          return entry;
         }).join(','));
       }
     }
@@ -1209,13 +1213,15 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     for (var i = 0; i < sources.length; i++) {
       var s = sources[i];
       if (s.srcset && !s.srcset.includes('/api/asset')) {
-        var entries = s.srcset.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+        var entries = s.srcset.split(',');
         s.srcset = entries.map(function(entry) {
-          return entry.replace(/(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/, function(url) {
-            if (!shouldProxyUrl(url)) return url;
-            var p = proxyUrl(url);
-            return p || url;
-          });
+          var trimmed = entry.trim();
+          var parts = trimmed.split(/\s+/);
+          var url = parts[0];
+          if (!url || !shouldProxyUrl(url)) return entry;
+          var p = proxyUrl(url);
+          if (p) { parts[0] = p; return parts.join(' '); }
+          return entry;
         }).join(',');
       }
     }

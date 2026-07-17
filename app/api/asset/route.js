@@ -12,7 +12,14 @@ export async function GET(request) {
   }
 
   try {
-    const targetUrl = new URL(url);
+    // Validate URL
+    let targetUrl;
+    try {
+      targetUrl = new URL(url);
+    } catch {
+      console.error(`[asset] Invalid URL: ${url}`);
+      return new NextResponse(null, { status: 400 });
+    }
     
     // Build request headers
     const headers = {
@@ -27,7 +34,14 @@ export async function GET(request) {
       headers["Cookie"] = cachedCookies;
     }
 
-    let res = await fetch(url, { headers, redirect: "follow" });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    let res;
+    try {
+      res = await fetch(url, { headers, redirect: "follow", signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     // If we got an HTML response (likely a security challenge), try following the redirect
     const contentType = res.headers.get("content-type") || "";
