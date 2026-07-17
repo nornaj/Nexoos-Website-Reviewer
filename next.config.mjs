@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  serverExternalPackages: ["puppeteer-core"],
+  serverExternalPackages: ["puppeteer-core", "puppeteer-extra", "puppeteer-extra-plugin-stealth"],
 
   // Unique build ID per deployment — forces all chunk filenames to change
   generateBuildId: async () => {
