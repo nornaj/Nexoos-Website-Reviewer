@@ -32,14 +32,15 @@ async function fetchWithBrowser(url) {
 
   console.log(`[proxy] Using local Chrome: ${executablePath}`);
   const browser = await puppeteer.launch({
-    headless: "shell",
+    headless: true, // New headless — full browser, much harder for WAFs to detect
     executablePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-software-rasterizer",
+      "--disable-blink-features=AutomationControlled", // Hide navigator.webdriver
+      "--disable-features=IsolateOrigins,site-per-process", // Allow cross-origin access
+      "--window-size=1280,900",
     ],
     defaultViewport: { width: 1280, height: 900 },
   });
@@ -48,6 +49,13 @@ async function fetchWithBrowser(url) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
     
+    // Override navigator.webdriver to avoid bot detection
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      // Override chrome.runtime to look like a real browser
+      window.chrome = { runtime: {} };
+    });
+
     // Set extra headers to look more like a real browser
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
@@ -389,10 +397,13 @@ async function fetchWithBrowser(url) {
             const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
             for (let y = 0; y < max; y += step) {
               window.scrollTo(0, y);
-              await new Promise(r => setTimeout(r, 200));
+              await new Promise(r => setTimeout(r, 300));
             }
             window.scrollTo(0, 0);
           });
+          
+          // Wait for images triggered by scrolling to finish loading
+          await page.waitForNetworkIdle({ timeout: 5000, idleTime: 1000 }).catch(() => {});
           
           // Re-capture the HTML after clean reload
           html = await page.content();
