@@ -79,7 +79,11 @@ async function fetchWithBrowser(url) {
     await new Promise((r) => setTimeout(r, 1000));
 
     // Detect security challenges: SiteGround PoW, Cloudflare, or generic
-    const challengeType = await page.evaluate(() => {
+    // Retry up to 3 times because the challenge page may auto-redirect
+    let challengeType = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        challengeType = await page.evaluate(() => {
       const title = (document.title || "").toLowerCase();
       // SiteGround: "Robot Challenge Screen", has #powCaptcha, uses sgchallenge variable
       if (title.includes("robot challenge") || document.querySelector("#powCaptcha") || typeof window.sgchallenge !== "undefined") {
@@ -96,7 +100,20 @@ async function fetchWithBrowser(url) {
       }
       return null;
     });
-
+        break; // evaluate succeeded, exit retry loop
+      } catch (e) {
+        // Context destroyed by auto-navigation, wait and retry
+        console.log(`[proxy] Challenge detect attempt ${attempt + 1} failed: ${e.message}`);
+        await new Promise(r => setTimeout(r, 2000));
+        // If we exhausted retries, check URL for challenge patterns
+        if (attempt === 2) {
+          const currentUrl = page.url();
+          if (currentUrl.includes('.well-known') || currentUrl.includes('captcha')) {
+            challengeType = 'siteground';
+          }
+        }
+      }
+    }
     if (challengeType) {
       console.log(`[proxy] Security challenge detected (${challengeType}) for ${url}, waiting for redirect...`);
       try {
@@ -147,8 +164,74 @@ async function fetchWithBrowser(url) {
         try { await page.coverage.stopCSSCoverage(); } catch {}
         await page.coverage.startCSSCoverage();
         
+        // Set up CDP to capture image response bodies during reload
+        // This bypasses canvas CORS tainting — we get raw network data
+        const cdp = await page.createCDPSession();
+        const capturedImages = new Map();
+        await cdp.send('Network.enable');
+        cdp.on('Network.responseReceived', async (event) => {
+          const { requestId, response } = event;
+          const contentType = response.mimeType || '';
+          if (contentType.startsWith('image/') && response.status === 200) {
+            try {
+              const body = await cdp.send('Network.getResponseBody', { requestId });
+              if (body.base64Encoded) {
+                capturedImages.set(response.url, `data:${contentType};base64,${body.body}`);
+              } else {
+                const b64 = Buffer.from(body.body).toString('base64');
+                capturedImages.set(response.url, `data:${contentType};base64,${b64}`);
+              }
+            } catch {}
+          }
+        });
+        
         await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
         await new Promise((r) => setTimeout(r, 2000));
+        
+        // Scroll to trigger lazy images
+        await page.evaluate(async () => {
+          const step = Math.min(600, window.innerHeight);
+          const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+          for (let y = 0; y < max; y += step) {
+            window.scrollTo(0, y);
+            await new Promise(r => setTimeout(r, 200));
+          }
+          window.scrollTo(0, 0);
+        });
+        await new Promise(r => setTimeout(r, 1500));
+        
+        await cdp.send('Network.disable');
+        await cdp.detach();
+        
+        console.log(`[proxy] CDP captured ${capturedImages.size} images during reload`);
+        
+        // Inject captured images as data URIs into the page
+        if (capturedImages.size > 0) {
+          const imageMap = Object.fromEntries(capturedImages);
+          await page.evaluate((imgMap) => {
+            document.querySelectorAll('img[src]').forEach(img => {
+              const src = img.getAttribute('src');
+              if (src && imgMap[src]) {
+                img.setAttribute('src', imgMap[src]);
+                img.removeAttribute('srcset');
+                img.removeAttribute('data-srcset');
+              }
+            });
+            // Also check srcset-only images
+            document.querySelectorAll('img[srcset]').forEach(img => {
+              const srcset = img.getAttribute('srcset');
+              if (srcset) {
+                for (const [url, dataUri] of Object.entries(imgMap)) {
+                  if (srcset.includes(url)) {
+                    img.setAttribute('src', dataUri);
+                    img.removeAttribute('srcset');
+                    break;
+                  }
+                }
+              }
+            });
+          }, imageMap);
+        }
         
         console.log(`[proxy] Clean reload complete for ${url}`);
       } catch (e) {
@@ -325,7 +408,7 @@ async function fetchWithBrowser(url) {
     // Wait for lazy images to start loading
     await new Promise(r => setTimeout(r, 1500));
 
-    await page.evaluate(async () => {
+    const imgStats = await page.evaluate(async () => {
       // Cache: url -> dataUri (avoids re-fetching the same URL)
       const cache = new Map();
 
@@ -372,25 +455,30 @@ async function fetchWithBrowser(url) {
           await Promise.allSettled(items.slice(i, i + batchSize).map(handler));
         }
       }
-
       // 1. Convert <img> elements — try canvas first, then fetch as fallback
       const imgs = Array.from(document.querySelectorAll('img[src]'));
+      let stats = { total: 0, canvas: 0, fetch: 0, failed: 0, skipped: 0 };
       await processBatch(imgs, async (img) => {
         const src = img.getAttribute('src');
-        if (!src || src.startsWith('data:') || src.startsWith('blob:')) return;
+        if (!src || src.startsWith('data:') || src.startsWith('blob:')) { stats.skipped++; return; }
+        stats.total++;
         
         // Try canvas extraction first (uses already-rendered image)
         let dataUri = imgToDataUri(img);
+        if (dataUri) { stats.canvas++; }
         
         // Fallback to fetch if canvas failed (CORS or not loaded)
         if (!dataUri) {
           dataUri = await fetchAsDataUri(src);
+          if (dataUri) { stats.fetch++; }
         }
         
         if (dataUri) {
           img.setAttribute('src', dataUri);
           img.removeAttribute('srcset');
           img.removeAttribute('data-srcset');
+        } else {
+          stats.failed++;
         }
       });
 
@@ -470,8 +558,9 @@ async function fetchWithBrowser(url) {
         const dataUri = await fetchAsDataUri(bgUrl);
         if (dataUri) el.style.backgroundImage = `url(${dataUri})`;
       });
+      return stats;
     });
-    console.log(`[proxy] Image conversion complete for ${url}`);
+    console.log(`[proxy] Image conversion for ${url}: ${JSON.stringify(imgStats)}`);
 
     let html = await page.content();
     
@@ -510,7 +599,78 @@ async function fetchWithBrowser(url) {
               allCSS.push(entry.text);
             }
           }
-          // Re-capture the HTML after reload
+          
+          // Scroll to trigger lazy images on the clean page
+          await page.evaluate(async () => {
+            const step = Math.min(600, window.innerHeight);
+            const max = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+            for (let y = 0; y < max; y += step) {
+              window.scrollTo(0, y);
+              await new Promise(r => setTimeout(r, 200));
+            }
+            window.scrollTo(0, 0);
+          });
+          await new Promise(r => setTimeout(r, 1500));
+          
+          // Re-run image conversion on the clean, authenticated page
+          console.log(`[proxy] Re-extracting images after CSS reload...`);
+          const reloadImgStats = await page.evaluate(async () => {
+            const cache = new Map();
+            async function fetchAsDataUri(url, timeout = 8000) {
+              if (!url || url.startsWith('data:') || url.startsWith('blob:')) return null;
+              if (cache.has(url)) return cache.get(url);
+              try {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeout);
+                const res = await fetch(url, { signal: controller.signal, credentials: 'include' });
+                clearTimeout(timer);
+                if (!res.ok) { cache.set(url, null); return null; }
+                const blob = await res.blob();
+                if (blob.size > 4 * 1024 * 1024) { cache.set(url, null); return null; }
+                const result = await new Promise((resolve) => {
+                  const reader = new FileReader();
+                  reader.onloadend = () => resolve(reader.result);
+                  reader.onerror = () => resolve(null);
+                  reader.readAsDataURL(blob);
+                });
+                cache.set(url, result);
+                return result;
+              } catch { cache.set(url, null); return null; }
+            }
+            function imgToDataUri(img) {
+              try {
+                if (!img.complete || img.naturalWidth === 0) return null;
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                return canvas.toDataURL('image/webp', 0.85);
+              } catch { return null; }
+            }
+            const imgs = Array.from(document.querySelectorAll('img[src]'));
+            let stats = { total: 0, canvas: 0, fetch: 0, failed: 0 };
+            for (const img of imgs) {
+              const src = img.getAttribute('src');
+              if (!src || src.startsWith('data:') || src.startsWith('blob:')) continue;
+              stats.total++;
+              let dataUri = imgToDataUri(img);
+              if (dataUri) { stats.canvas++; }
+              if (!dataUri) {
+                dataUri = await fetchAsDataUri(src);
+                if (dataUri) { stats.fetch++; }
+              }
+              if (dataUri) {
+                img.setAttribute('src', dataUri);
+                img.removeAttribute('srcset');
+                img.removeAttribute('data-srcset');
+              } else { stats.failed++; }
+            }
+            return stats;
+          });
+          console.log(`[proxy] Post-reload image stats: ${JSON.stringify(reloadImgStats)}`);
+          
+          // Re-capture the HTML after reload + image conversion
           html = await page.content();
           console.log(`[proxy] After reload: ${allCSS.length}/${reloadEntries.length} valid CSS blocks`);
         } catch (e) {
