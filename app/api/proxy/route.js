@@ -184,7 +184,7 @@ function captureWithSingleFile(url, cookies, executablePath) {
     '--remove-alternative-images', 'false',
     '--block-scripts', 'true',
     '--block-audios', 'true',
-    '--block-videos', 'true',
+    '--block-videos', 'false',
     '--compress-HTML', 'false',
     '--insert-meta-CSP', 'false',
     '--insert-single-file-comment', 'false',
@@ -672,20 +672,24 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
       width: 0 !important;
       height: 0 !important;
     }
-    /* JS-dependent carousels/sliders: make items visible without JavaScript */
-    /* Raw JetElements carousel (BEFORE Slick.js initializes — Slick classes don't exist) */
+    /* JS-dependent carousels/sliders: force visible without JavaScript */
+    /* Slick slider: override translate3d positioning, show all slides in a row */
+    .slick-track { display: flex !important; transform: none !important; width: auto !important; }
+    .slick-slide { display: block !important; flex: 0 0 33.33% !important; max-width: 33.33% !important; width: auto !important; position: relative !important; left: auto !important; opacity: 1 !important; }
+    .slick-list { overflow: hidden !important; }
+    .slick-dots { display: none !important; }
+    .slick-arrow { display: none !important; }
+    /* JetElements carousel with Slick */
+    .jet-carousel .slick-track { display: flex !important; transform: none !important; }
+    .jet-carousel .slick-slide { flex: 0 0 33.33% !important; max-width: 33.33% !important; }
+    /* Raw JetElements carousel (without Slick) */
     .jet-carousel .jet-carousel__items { display: flex !important; flex-wrap: wrap !important; overflow: visible !important; }
     .jet-carousel .jet-carousel__item { display: block !important; flex: 0 0 33.33% !important; max-width: 33.33% !important; visibility: visible !important; opacity: 1 !important; }
     .jet-carousel .jet-carousel__item-inner { display: block !important; visibility: visible !important; }
     .jet-carousel .jet-carousel__content { display: block !important; visibility: visible !important; }
-    /* Slick slider (if somehow initialized) */
-    .slick-track { display: flex !important; }
-    .slick-slide { display: block !important; flex-shrink: 0; }
-    .slick-list { overflow: hidden !important; }
     /* Swiper carousel (Elementor) */
-    .swiper-wrapper { display: flex !important; }
+    .swiper-wrapper { display: flex !important; transform: none !important; }
     .swiper-slide { display: block !important; flex-shrink: 0 !important; visibility: visible !important; }
-    /* Elementor carousel/slider */
     .elementor-slides .swiper-slide { display: block !important; }
     .elementor-image-carousel .swiper-slide { display: block !important; }
   </style>`;
