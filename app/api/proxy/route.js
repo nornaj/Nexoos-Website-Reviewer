@@ -358,10 +358,9 @@ async function fetchWithBrowser(url) {
     let html = await page.content();
 
     // ===== IMAGE INLINING via CDP Network.loadNetworkResource =====
-    // In headless:"shell", the browser doesn't render images (canvas fails, fetch gets WAF-challenged).
-    // CDP Network.loadNetworkResource loads through the browser's network stack with proper
-    // Sec-Fetch-Dest headers and cookies, bypassing WAF challenges.
-    // Each operation has a timeout to prevent the IO.read hang.
+    // CDP captures image data BEFORE the CSS reload (which may overwrite html).
+    // The actual URL replacements are applied AFTER CSS Coverage processing.
+    let imageMap = {};
     try {
       const cdp = await page.createCDPSession();
       
@@ -380,17 +379,14 @@ async function fetchWithBrowser(url) {
       console.log(`[proxy] Found ${imageUrls.length} image URLs to inline via CDP`);
 
       let converted = 0, failed = 0;
-      const imageMap = {};
-      const MAX_TOTAL = 15 * 1024 * 1024; // 15MB max total
+      const MAX_TOTAL = 15 * 1024 * 1024;
       let totalSize = 0;
 
-      // Helper: wrap any promise with a timeout
       const withTimeout = (promise, ms) => Promise.race([
         promise,
         new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
       ]);
 
-      // Get the main frame ID for CDP
       let frameId;
       try {
         const { frameTree } = await cdp.send('Page.getFrameTree');
@@ -402,14 +398,13 @@ async function fetchWithBrowser(url) {
       for (const imgUrl of imageUrls) {
         if (totalSize > MAX_TOTAL) break;
         try {
-          // Load image through browser's network stack (uses cookies + proper headers)
           const cdpResult = await withTimeout(
             cdp.send('Network.loadNetworkResource', {
               url: imgUrl,
               frameId,
               options: { disableCache: false, includeCredentials: true }
             }),
-            5000 // 5s timeout per image
+            5000
           );
 
           if (!cdpResult.resource || !cdpResult.resource.success || !cdpResult.resource.stream) {
@@ -417,17 +412,16 @@ async function fetchWithBrowser(url) {
             continue;
           }
 
-          // Read the stream with timeout
           const stream = cdpResult.resource.stream;
           let data = '';
           let base64Encoded = false;
           try {
             let eof = false;
             let readCount = 0;
-            while (!eof && readCount < 50) { // Max 50 chunks (~50MB safety)
+            while (!eof && readCount < 50) {
               const chunk = await withTimeout(
                 cdp.send('IO.read', { handle: stream, size: 1024 * 1024 }),
-                3000 // 3s timeout per chunk
+                3000
               );
               data += chunk.data;
               base64Encoded = chunk.base64Encoded;
@@ -443,18 +437,13 @@ async function fetchWithBrowser(url) {
 
           if (!data || data.length === 0) { failed++; continue; }
 
-          // Detect MIME type
           const headers = cdpResult.resource.headers || {};
           let mime = headers['content-type'] || headers['Content-Type'] || 'image/png';
           if (mime.includes(';')) mime = mime.split(';')[0].trim();
-          
-          // Skip if we got HTML back (WAF challenge page)
           if (mime.includes('text/html')) { failed++; continue; }
 
-          // Build data URI
           const b64 = base64Encoded ? data : Buffer.from(data, 'binary').toString('base64');
-          const dataUri = `data:${mime};base64,${b64}`;
-          imageMap[imgUrl] = dataUri;
+          imageMap[imgUrl] = `data:${mime};base64,${b64}`;
           totalSize += b64.length;
           converted++;
         } catch {
@@ -463,12 +452,6 @@ async function fetchWithBrowser(url) {
       }
 
       console.log(`[proxy] Image inlining: ${converted} converted, ${failed} failed (${Math.round(totalSize / 1024)}KB total)`);
-
-      // Apply image replacements to the HTML
-      for (const [url, dataUri] of Object.entries(imageMap)) {
-        html = html.split(url).join(dataUri);
-      }
-
       await cdp.detach().catch(() => {});
     } catch (e) {
       console.log(`[proxy] Image inlining failed: ${e.message}`);
@@ -553,6 +536,16 @@ async function fetchWithBrowser(url) {
       });
       
       console.log(`[proxy] CSS Coverage: injected ${allCSS.length} CSS blocks, removed external links`);
+    }
+
+    // Apply image data URI replacements to the final HTML
+    // This MUST happen after CSS Coverage processing, because the CSS reload
+    // can overwrite `html` with page.content() which loses any previous replacements.
+    if (Object.keys(imageMap).length > 0) {
+      for (const [url, dataUri] of Object.entries(imageMap)) {
+        html = html.split(url).join(dataUri);
+      }
+      console.log(`[proxy] Applied ${Object.keys(imageMap).length} image replacements to final HTML`);
     }
 
     // Images now use direct URLs from the original domain.
