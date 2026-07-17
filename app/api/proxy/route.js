@@ -880,18 +880,14 @@ const CDN_DOMAINS = [
   'fastly.net',
 ];
 
-// Rewrite image/media/font URLs from the target domain to use our asset proxy
-function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
+// Rewrite image/media/font URLs: resolve relative URLs to absolute (original domain)
+// The page is served from our Railway domain, so relative URLs like /path/to/img.png
+// would resolve to railway.app/path/to/img.png (404). We fix them to point to the
+// original site. The browser can load <img> cross-origin without CORS issues.
+function resolveAssetUrls(html, targetOrigin, proxyOrigin) {
   const hostname = new URL(targetOrigin).hostname;
-  const assetBase = `${proxyOrigin}/api/asset?url=`;
   
-  // Extensions to skip (never proxy scripts/pages)
-  const skipPattern = /\.(js|mjs|json|html|htm|php|aspx)(\?|#|$)/i;
-  
-  // Media/image extensions to always proxy regardless of domain
-  const mediaPattern = /\.(png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|ogg|woff2?|ttf|eot|otf)(\?|#|$)/i;
-  
-  // Resolve relative URL to absolute
+  // Resolve relative URL to absolute on the ORIGINAL domain
   function resolveUrl(url) {
     if (url.startsWith('//')) return 'https:' + url;
     if (url.startsWith('/') && !url.startsWith('//')) return targetOrigin + url;
@@ -899,99 +895,74 @@ function proxyAssetUrls(html, targetOrigin, proxyOrigin) {
     return null;
   }
   
-  // Check if a URL belongs to a known CDN
-  function isCdnUrl(url) {
-    try {
-      const resolved = resolveUrl(url);
-      if (!resolved) return false;
-      const urlHost = new URL(resolved).hostname;
-      return CDN_DOMAINS.some(cdn => urlHost === cdn || urlHost.endsWith('.' + cdn));
-    } catch { return false; }
-  }
-  
-  // Check if URL should be proxied through our asset endpoint
-  function shouldProxy(url) {
+  // Check if URL needs resolution (relative URL or needs to be made absolute)
+  function shouldResolve(url) {
     if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return false;
-    if (skipPattern.test(url)) return false;
-    const resolved = resolveUrl(url);
-    if (!resolved) return false;
-    // Proxy ALL http(s) URLs — in the iframe context, cross-origin resources
-    // will fail due to different origin, so everything needs proxying
-    return true;
+    // Only resolve relative URLs — absolute URLs are already fine
+    if (url.startsWith('/') && !url.startsWith('//')) return true;
+    if (url.startsWith('//')) return true;
+    return false;
   }
   
-  function getProxied(url) {
-    const resolved = resolveUrl(url);
-    return resolved ? assetBase + encodeURIComponent(resolved) : null;
+  function getResolved(url) {
+    return resolveUrl(url);
   }
   
-  // 1. Proxy ALL src and poster attributes from the target domain
-  // (no file extension requirement — catches all images, videos, fonts)
-  // Use \s before src/poster to avoid matching data-src, data-poster etc.
+  // 1. Resolve relative src and poster attributes to absolute URLs
   html = html.replace(
     /(\s(?:src|poster)\s*=\s*["'])([^"']+)(["'])/gi,
     (match, prefix, url, suffix) => {
-      if (!shouldProxy(url)) return match;
-      const proxied = getProxied(url);
-      return proxied ? prefix + proxied + suffix : match;
+      if (!shouldResolve(url)) return match;
+      const resolved = getResolved(url);
+      return resolved ? prefix + resolved + suffix : match;
     }
   );
   
-  // 2. Proxy data-src, data-lazy-src, data-bg (WordPress/lazy-loading plugins)
+  // 2. Resolve data-src, data-lazy-src, data-bg (WordPress/lazy-loading plugins)
   html = html.replace(
     /((?:data-src|data-lazy-src|data-bg|data-background-image|data-srcset)\s*=\s*["'])([^"']+)(["'])/gi,
     (match, prefix, url, suffix) => {
-      // Handle data-srcset specially (comma-separated)
       if (match.toLowerCase().startsWith('data-srcset')) {
-        const entries = url.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+        const entries = url.split(',');
         const rewritten = entries.map(entry => {
-          return entry.replace(
-            /(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/,
-            (u) => {
-              if (!shouldProxy(u)) return u;
-              return getProxied(u) || u;
-            }
-          );
+          const trimmed = entry.trim();
+          const parts = trimmed.split(/\s+/);
+          if (parts[0] && shouldResolve(parts[0])) {
+            parts[0] = getResolved(parts[0]) || parts[0];
+          }
+          return parts.join(' ');
         }).join(',');
         return prefix + rewritten + suffix;
       }
-      if (!shouldProxy(url)) return match;
-      const proxied = getProxied(url);
-      return proxied ? prefix + proxied + suffix : match;
+      if (!shouldResolve(url)) return match;
+      const resolved = getResolved(url);
+      return resolved ? prefix + resolved + suffix : match;
     }
   );
   
-  // 3. Proxy srcset values (responsive images)
-  // Note: can't simply split on commas — URLs may contain commas (e.g., Cloudflare /cdn-cgi/image/width=1200,quality=80/...)
-  // Instead, we match each srcset entry as: URL followed by optional whitespace+descriptor, then comma or end
+  // 3. Resolve srcset values
   html = html.replace(
     /((?:srcset|imageSrcSet)\s*=\s*["'])([^"']*)(["'])/gi,
     (match, prefix, srcset, suffix) => {
-      // Parse srcset: split on comma followed by optional whitespace and a URL-start character
-      // Each entry is: <url> [<descriptor>]
-      const entries = srcset.split(/,(?=\s*(?:https?:\/\/|\/\/|\/(?!\/)))/);
+      const entries = srcset.split(',');
       const rewritten = entries.map(entry => {
-        // Match the URL part (everything up to the last whitespace+descriptor like "1x" or "768w")
-        return entry.replace(
-          /(https?:\/\/[^\s]+|\/\/[^\s]+|\/(?!\/|api\/)[^\s]+)/,
-          (url) => {
-            if (!shouldProxy(url)) return url;
-            return getProxied(url) || url;
-          }
-        );
+        const trimmed = entry.trim();
+        const parts = trimmed.split(/\s+/);
+        if (parts[0] && shouldResolve(parts[0])) {
+          parts[0] = getResolved(parts[0]) || parts[0];
+        }
+        return parts.join(' ');
       }).join(',');
       return prefix + rewritten + suffix;
     }
   );
   
-  // 4. Proxy url() in ALL CSS — inline styles, <style> tags, browser-inlined CSS
-  // This catches background-image, @font-face src, cursor, etc.
+  // 4. Resolve url() in CSS — relative URLs need to point to original domain
   html = html.replace(
-    /url\(\s*['"]?(https?:\/\/[^'")\s]+|\/(?!\/|api\/)[^'")\s]+)['"]?\s*\)/gi,
+    /url\(\s*['"]?(\/(?!\/|api\/)[^'")\s]+)['"]?\s*\)/gi,
     (match, url) => {
-      if (!shouldProxy(url)) return match;
-      const proxied = getProxied(url);
-      return proxied ? `url(${proxied})` : match;
+      const resolved = getResolved(url);
+      return resolved ? `url(${resolved})` : match;
     }
   );
   
@@ -1004,10 +975,9 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     html = stripFrameworkScripts(html);
   }
   
-  // Proxy image/media URLs through our asset endpoint (server-side)
-  // ALL images must go through the proxy because the user's browser
-  // doesn't have the SiteGround challenge cookies — only our server does
-  html = proxyAssetUrls(html, targetUrl.origin, proxyOrigin);
+  // Resolve relative URLs to absolute (pointing to original domain)
+  // Browser loads images directly — no proxying needed for most sites
+  html = resolveAssetUrls(html, targetUrl.origin, proxyOrigin);
   
   const baseHref = `${targetUrl.origin}${targetUrl.pathname.replace(/\/[^/]*$/, "/")}`;
 
@@ -1075,16 +1045,12 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
   var ASSET_PROXY = PROXY_ORIGIN + '/api/asset?url=';
   var USED_BROWSER = ${usedBrowser ? 'true' : 'false'};
 
-  // ===== IMAGE PROXY: Always proxy images through our server =====
-  // The user's browser doesn't have SiteGround challenge cookies,
-  // so ALL images must go through our asset proxy
+  // ===== IMAGE HANDLING: Direct loading with proxy fallback =====
+  // Images use direct URLs to the original site (browser handles cross-origin <img> fine).
+  // Only fall back to /api/asset proxy if an image fails to load (hotlink/WAF).
   {
-  
-  // Known CDN domains to always proxy
-  var CDN_DOMAINS = ['cdn.shopify.com','cdn.shopifycdn.net','images.unsplash.com','cdn.jsdelivr.net','cdn.builder.io','images.contentful.com','res.cloudinary.com','cdn.sanity.io','images.prismic.io','cdn.bigcommerce.com','akamaized.net','cloudfront.net','imgix.net','fastly.net'];
-  var MEDIA_EXT = /\.(png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|mp4|webm|woff2?|ttf|eot|otf)([?#]|$)/i;
 
-  // Convert any URL to an absolute URL using the target origin
+  // Resolve any URL to absolute on the target origin
   function resolveUrl(url) {
     if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return null;
     if (url.startsWith('//')) return 'https:' + url;
@@ -1093,88 +1059,33 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     return TARGET_ORIGIN + '/' + url;
   }
 
-  function isCdnUrl(url) {
-    try {
-      var resolved = resolveUrl(url);
-      if (!resolved) return false;
-      var h = new URL(resolved).hostname;
-      for (var i = 0; i < CDN_DOMAINS.length; i++) {
-        if (h === CDN_DOMAINS[i] || h.endsWith('.' + CDN_DOMAINS[i])) return true;
-      }
-    } catch(e) {}
-    return false;
-  }
-
-  function shouldProxyUrl(url) {
-    if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return false;
-    var resolved = resolveUrl(url);
-    return !!resolved;
-  }
-
-  // Proxy an image URL through our asset endpoint
+  // Proxy an image URL through our asset endpoint (fallback only)
   function proxyUrl(url) {
     var resolved = resolveUrl(url);
     if (!resolved) return null;
     return ASSET_PROXY + encodeURIComponent(resolved);
   }
 
-  // Rewrite a single image element's src to use the proxy
-  function proxyImage(img) {
-    if (img.dataset.nexoosProxied) return;
+  // Resolve relative URLs in an image element to absolute (original domain)
+  function resolveImageUrls(img) {
+    if (img.dataset.nexoosResolved) return;
     var src = img.getAttribute('src');
-    if (src && !src.includes('/api/asset') && !src.startsWith('data:') && shouldProxyUrl(src)) {
-      var proxied = proxyUrl(src);
-      if (proxied) {
-        img.dataset.nexoosProxied = '1';
-        img.setAttribute('src', proxied);
-      }
-    }
-    // Also handle srcset
-    var srcset = img.getAttribute('srcset');
-    if (srcset && !srcset.includes('/api/asset')) {
-      var entries = srcset.split(',');
-      img.setAttribute('srcset', entries.map(function(entry) {
-        var trimmed = entry.trim();
-        var parts = trimmed.split(/\s+/);
-        var url = parts[0];
-        if (!url || url.includes('/api/asset')) return entry;
-        if (!shouldProxyUrl(url)) return entry;
-        var p = proxyUrl(url);
-        if (p) { parts[0] = p; return parts.join(' '); }
-        return entry;
-      }).join(','));
-    }
-    // Handle data-src (lazy loading)
-    var dataSrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-    if (dataSrc && !dataSrc.includes('/api/asset') && !dataSrc.startsWith('data:')) {
-      var proxied = proxyUrl(dataSrc);
-      if (proxied) {
-        img.setAttribute('data-src', proxied);
-        if (img.getAttribute('data-lazy-src')) img.setAttribute('data-lazy-src', proxied);
+    if (src && !src.startsWith('data:') && !src.startsWith('http') && !src.startsWith('//') && !src.includes('/api/asset')) {
+      var resolved = resolveUrl(src);
+      if (resolved) {
+        img.dataset.nexoosResolved = '1';
+        img.setAttribute('src', resolved);
       }
     }
   }
 
-  // Rewrite background-image in inline styles
-  function proxyBackgroundImages(el) {
-    var style = el.getAttribute('style');
-    if (style && style.includes('url(') && !style.includes('/api/asset')) {
-      el.setAttribute('style', style.replace(/url\\(\\s*['"]?([^'")\\s]+)['"]?\\s*\\)/gi, function(match, url) {
-        if (url.startsWith('data:') || url.includes('/api/asset')) return match;
-        var p = proxyUrl(url);
-        return p ? 'url(' + p + ')' : match;
-      }));
-    }
-  }
-
-  // 1. CATCH-ALL ERROR HANDLER: If any image fails, retry through proxy
+  // 1. ERROR HANDLER: If any image fails to load directly, retry through proxy
   document.addEventListener('error', function(e) {
     var el = e.target;
     if (el.tagName === 'IMG' && !el.dataset.nexoosRetried) {
       el.dataset.nexoosRetried = '1';
       var src = el.getAttribute('src');
       if (src && !src.includes('/api/asset') && !src.startsWith('data:')) {
-        // On error, always try proxying regardless of domain — the image failed anyway
         var proxied = proxyUrl(src);
         if (proxied) el.setAttribute('src', proxied);
       }
@@ -1187,7 +1098,7 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
         var entries = srcset.split(',');
         el.setAttribute('srcset', entries.map(function(entry) {
           var trimmed = entry.trim();
-          var parts = trimmed.split(/\s+/);
+          var parts = trimmed.split(/\\s+/);
           var url = parts[0];
           if (!url || url.includes('/api/asset')) return entry;
           var p = proxyUrl(url);
@@ -1198,61 +1109,33 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
     }
   }, true);
 
-  // 2. PROACTIVE: Rewrite all existing images on page load
-  function proxyAllImages() {
+  // 2. Resolve relative URLs on existing images (page may have relative src that 
+  //    the server-side resolver missed, e.g. dynamically generated)
+  function resolveAllImages() {
     var imgs = document.querySelectorAll('img');
-    for (var i = 0; i < imgs.length; i++) proxyImage(imgs[i]);
-    // Also handle elements with background-image
-    var allEls = document.querySelectorAll('[style*="url"]');
-    for (var i = 0; i < allEls.length; i++) proxyBackgroundImages(allEls[i]);
-    // Handle <source> elements (picture, video, audio)
-    var sources = document.querySelectorAll('source[srcset], source[src]');
-    for (var i = 0; i < sources.length; i++) {
-      var s = sources[i];
-      if (s.srcset && !s.srcset.includes('/api/asset')) {
-        var entries = s.srcset.split(',');
-        s.srcset = entries.map(function(entry) {
-          var trimmed = entry.trim();
-          var parts = trimmed.split(/\s+/);
-          var url = parts[0];
-          if (!url || !shouldProxyUrl(url)) return entry;
-          var p = proxyUrl(url);
-          if (p) { parts[0] = p; return parts.join(' '); }
-          return entry;
-        }).join(',');
-      }
-    }
+    for (var i = 0; i < imgs.length; i++) resolveImageUrls(imgs[i]);
   }
-  proxyAllImages();
+  resolveAllImages();
   if (document.readyState !== 'complete') {
-    window.addEventListener('load', proxyAllImages);
+    window.addEventListener('load', resolveAllImages);
   }
 
-  // 3. MUTATION OBSERVER: Catch dynamically added images
+  // 3. MUTATION OBSERVER: Resolve URLs on dynamically added images
   var observer = new MutationObserver(function(mutations) {
     for (var i = 0; i < mutations.length; i++) {
       var nodes = mutations[i].addedNodes;
       for (var j = 0; j < nodes.length; j++) {
         var node = nodes[j];
         if (node.nodeType !== 1) continue;
-        if (node.tagName === 'IMG') proxyImage(node);
+        if (node.tagName === 'IMG') resolveImageUrls(node);
         var imgs = node.querySelectorAll ? node.querySelectorAll('img') : [];
-        for (var k = 0; k < imgs.length; k++) proxyImage(imgs[k]);
-      }
-      // Handle src attribute changes
-      if (mutations[i].type === 'attributes' && mutations[i].attributeName === 'src') {
-        var target = mutations[i].target;
-        if (target.tagName === 'IMG' && !target.dataset.nexoosProxied) {
-          proxyImage(target);
-        }
+        for (var k = 0; k < imgs.length; k++) resolveImageUrls(imgs[k]);
       }
     }
   });
   observer.observe(document.documentElement, {
     childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ['src']
+    subtree: true
   });
 
   }
