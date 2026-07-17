@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 
 function formatExactDate(timestamp) {
   const d = new Date(timestamp);
@@ -116,8 +116,9 @@ export default function WebsitePreview({
   useEffect(() => { activeToolRef.current = activeTool; }, [activeTool]);
   useEffect(() => { onAnnotationAddRef.current = onAnnotationAdd; }, [onAnnotationAdd]);
 
-  // The proxied URL — always include a cache buster to prevent stale cached responses
-  const proxyUrl = url ? `/api/proxy?url=${encodeURIComponent(url)}&_t=${Date.now()}${refreshKey ? `&_r=${refreshKey}` : ""}` : "";
+  // Stable cache buster — only changes when url or refreshKey changes (prevents re-render loops)
+  const cacheBuster = useMemo(() => Date.now(), [url, refreshKey]);
+  const proxyUrl = url ? `/api/proxy?url=${encodeURIComponent(url)}&_t=${cacheBuster}${refreshKey ? `&_r=${refreshKey}` : ""}` : "";
 
   // Re-show loading spinner when refreshKey changes
   useEffect(() => {
