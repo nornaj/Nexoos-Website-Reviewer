@@ -1272,9 +1272,11 @@ export async function GET(request) {
       console.log(`[proxy] CSS inlining failed: ${e.message}`);
     }
 
-    // Extract proxy origin from request URL
-    const reqUrl = new URL(request.url);
-    const proxyOrigin = reqUrl.origin;
+    // Extract public proxy origin — behind Railway's reverse proxy, request.url
+    // gives localhost:3000, but x-forwarded-host/proto give the real public domain
+    const fwdHost = request.headers.get('x-forwarded-host') || request.headers.get('host');
+    const fwdProto = request.headers.get('x-forwarded-proto') || 'https';
+    const proxyOrigin = fwdHost ? `${fwdProto}://${fwdHost}` : new URL(request.url).origin;
 
     // Strip scripts for JS framework sites (whether browser-rendered or fallback)
     // This prevents hydration failures in the iframe

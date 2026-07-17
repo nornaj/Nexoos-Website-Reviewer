@@ -84,7 +84,8 @@ export async function GET(request) {
         "Cross-Origin-Resource-Policy": "cross-origin",
       },
     });
-  } catch {
+  } catch (e) {
+    console.error(`[asset] Error fetching ${url}: ${e.message}`);
     return new NextResponse(null, { status: 500 });
   }
 }
