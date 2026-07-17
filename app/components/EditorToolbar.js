@@ -123,7 +123,7 @@ export default function EditorToolbar({
           <div className="guest-banner">👤 Guest reviewer</div>
         )}
 
-        <span style={{ fontSize: "9px", color: "#999", marginLeft: "8px", userSelect: "none" }}>v7</span>
+        
       </div>
     </div>
   );
