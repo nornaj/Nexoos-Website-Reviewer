@@ -437,134 +437,131 @@ async function fetchWithBrowser(url) {
       console.log(`[proxy] CSS Coverage: injected ${allCSS.length} CSS blocks, removed external links`);
     }
 
-    // ===== IMAGE CAPTURE: Extract images from browser memory =====
-    // SiteGround's WAF blocks even in-browser fetch() for images (different Sec-Fetch headers).
-    // Instead, we use canvas to read already-loaded image pixels — zero network requests.
-    // Returns a URL→dataURI mapping that we apply to the HTML string (preserving CSS injection).
+    // ===== IMAGE CAPTURE via CDP: Extract images from Chrome's network cache =====
+    // Canvas fails in headless:"shell" because images aren't rendered (naturalWidth=0).
+    // CDP captures image data directly from the network layer — works in any headless mode.
     try {
-      const imageMap = await page.evaluate(async () => {
-        const map = {};
-        let converted = 0, failed = 0, skipped = 0;
-        const MAX_TOTAL = 25 * 1024 * 1024;
-        let totalSize = 0;
-
-        // Helper: convert a loaded image to data URI via canvas
-        function imageToDataUri(img) {
-          try {
-            if (!img.complete || img.naturalWidth === 0 || img.naturalHeight === 0) return null;
-            const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
-            // Use original format hint from src, default to png
-            const src = img.getAttribute('src') || '';
-            let mime = 'image/png';
-            if (src.match(/\.jpe?g/i)) mime = 'image/jpeg';
-            else if (src.match(/\.webp/i)) mime = 'image/webp';
-            return canvas.toDataURL(mime, 0.92);
-          } catch { return null; }
-        }
-
-        // Helper: fetch SVG source via XHR with proper image headers
-        function fetchSvgSource(url) {
-          return new Promise((resolve) => {
-            try {
-              const xhr = new XMLHttpRequest();
-              xhr.open('GET', url, true);
-              xhr.setRequestHeader('Accept', 'image/svg+xml,image/*');
-              xhr.responseType = 'blob';
-              xhr.timeout = 5000;
-              xhr.onload = function() {
-                if (xhr.status === 200 && xhr.response) {
-                  const reader = new FileReader();
-                  reader.onload = () => resolve(reader.result);
-                  reader.onerror = () => resolve(null);
-                  reader.readAsDataURL(xhr.response);
-                } else resolve(null);
-              };
-              xhr.onerror = () => resolve(null);
-              xhr.ontimeout = () => resolve(null);
-              xhr.send();
-            } catch { resolve(null); }
-          });
-        }
-
-        // Wait a moment for any remaining images to finish loading
-        await new Promise(r => setTimeout(r, 1000));
-
-        // Process all <img> elements
-        const imgs = document.querySelectorAll('img');
-        for (const img of imgs) {
+      const cdp = await page.createCDPSession();
+      
+      // Get all image URLs from the DOM
+      const imageUrls = await page.evaluate(() => {
+        const urls = new Set();
+        // <img> elements
+        document.querySelectorAll('img[src]').forEach(img => {
           const src = img.getAttribute('src');
-          if (!src || src.startsWith('data:') || src.startsWith('blob:')) { skipped++; continue; }
-          
-          // Resolve relative URL
-          let fullUrl;
-          try { fullUrl = new URL(src, window.location.href).href; } catch { continue; }
-
-          if (map[fullUrl]) { skipped++; continue; } // Already processed
-
-          let dataUri = null;
-
-          // Strategy 1: SVG — use XHR (canvas rasterizes SVGs, losing vector quality)
-          if (src.match(/\.svg/i)) {
-            dataUri = await fetchSvgSource(fullUrl);
+          if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
+            try { urls.add(new URL(src, window.location.href).href); } catch {}
           }
-          
-          // Strategy 2: Canvas — read from browser's loaded image cache (no network!)
-          if (!dataUri) {
-            dataUri = imageToDataUri(img);
+        });
+        // Background images in inline styles
+        document.querySelectorAll('[style]').forEach(el => {
+          const style = el.getAttribute('style') || '';
+          const m = style.match(/url\(['"]?([^'")]+)['"]?\)/);
+          if (m && m[1] && !m[1].startsWith('data:')) {
+            try { urls.add(new URL(m[1], window.location.href).href); } catch {}
           }
-
-          if (dataUri) {
-            const size = dataUri.length * 0.75; // Rough base64→bytes
-            if (totalSize + size > MAX_TOTAL) { skipped++; continue; }
-            totalSize += size;
-            map[fullUrl] = dataUri;
-            // Also map the original src (might be relative)
-            if (src !== fullUrl) map[src] = dataUri;
+        });
+        return [...urls];
+      });
+      
+      console.log(`[proxy] Found ${imageUrls.length} image URLs in DOM`);
+      
+      // Use CDP Fetch to download each image through the browser's network stack
+      // This uses the browser's cookies and session — bypasses WAF
+      let converted = 0, failed = 0;
+      const imageMap = {};
+      const MAX_TOTAL = 20 * 1024 * 1024; // 20MB total
+      let totalSize = 0;
+      
+      for (const imgUrl of imageUrls) {
+        if (totalSize > MAX_TOTAL) break;
+        try {
+          // Use page.evaluate to fetch via the browser's network stack with credentials
+          const result = await page.evaluate(async (url) => {
+            try {
+              const resp = await fetch(url, { 
+                credentials: 'include',
+                mode: 'no-cors',
+                cache: 'force-cache'
+              });
+              // Try to read as blob
+              const blob = await resp.blob();
+              if (blob.size === 0 || blob.type.includes('text/html')) return null;
+              return await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve({ data: reader.result, size: blob.size });
+                reader.onerror = () => resolve(null);
+                reader.readAsDataURL(blob);
+              });
+            } catch { return null; }
+          }, imgUrl);
+          
+          if (result && result.data && !result.data.includes('text/html')) {
+            imageMap[imgUrl] = result.data;
+            totalSize += result.size;
             converted++;
           } else {
-            failed++;
+            // Fallback: try CDP Network.loadNetworkResource (uses browser's cookies)
+            try {
+              const frameId = page.mainFrame()._id;
+              const cdpResult = await cdp.send('Network.loadNetworkResource', {
+                url: imgUrl,
+                frameId,
+                options: { disableCache: false, includeCredentials: true }
+              });
+              if (cdpResult.resource && cdpResult.resource.success) {
+                const stream = cdpResult.resource.stream;
+                if (stream) {
+                  // Read the stream
+                  let data = '';
+                  let eof = false;
+                  while (!eof) {
+                    const chunk = await cdp.send('IO.read', { handle: stream, size: 1024 * 1024 });
+                    data += chunk.data;
+                    eof = chunk.eof;
+                  }
+                  await cdp.send('IO.close', { handle: stream });
+                  
+                  // Detect MIME type
+                  const headers = cdpResult.resource.headers || {};
+                  let mime = headers['content-type'] || 'image/png';
+                  if (mime.includes(';')) mime = mime.split(';')[0];
+                  
+                  if (!mime.includes('text/html') && data.length > 0) {
+                    const dataUri = `data:${mime};base64,${chunk.base64Encoded ? data : Buffer.from(data).toString('base64')}`;
+                    imageMap[imgUrl] = dataUri;
+                    totalSize += data.length;
+                    converted++;
+                  } else {
+                    failed++;
+                    console.log(`[proxy] CDP image blocked (HTML response): ${imgUrl.split('/').pop()}`);
+                  }
+                } else {
+                  failed++;
+                }
+              } else {
+                failed++;
+                console.log(`[proxy] CDP image failed: ${imgUrl.split('/').pop()} - ${cdpResult.resource?.httpStatusCode || 'no status'}`);
+              }
+            } catch (cdpErr) {
+              failed++;
+            }
           }
+        } catch (e) {
+          failed++;
         }
-
-        // Process background-image in inline styles
-        const bgEls = document.querySelectorAll('[style]');
-        for (const el of bgEls) {
-          const style = el.getAttribute('style') || '';
-          if (!style.includes('url(')) continue;
-          const urlMatch = style.match(/url\(['"]?([^'")]+)['"]?\)/);
-          if (!urlMatch || !urlMatch[1] || urlMatch[1].startsWith('data:')) continue;
-          let fullUrl;
-          try { fullUrl = new URL(urlMatch[1], window.location.href).href; } catch { continue; }
-          if (map[fullUrl]) continue;
-          
-          // Try fetching background images via XHR
-          const dataUri = await fetchSvgSource(fullUrl); // Works for all image types despite name
-          if (dataUri) {
-            const size = dataUri.length * 0.75;
-            if (totalSize + size > MAX_TOTAL) continue;
-            totalSize += size;
-            map[fullUrl] = dataUri;
-            if (urlMatch[1] !== fullUrl) map[urlMatch[1]] = dataUri;
-            converted++;
-          }
-        }
-
-        return { map, converted, failed, skipped, totalKB: Math.round(totalSize / 1024) };
-      });
-
-      console.log(`[proxy] Image capture: ${imageMap.converted} converted, ${imageMap.failed} failed, ${imageMap.skipped} skipped (${imageMap.totalKB}KB total)`);
+      }
+      
+      console.log(`[proxy] Image capture: ${converted} converted, ${failed} failed (${Math.round(totalSize/1024)}KB total)`);
       
       // Apply image replacements to the HTML string (preserves CSS injection!)
-      const entries = Object.entries(imageMap.map);
+      const entries = Object.entries(imageMap);
       for (const [url, dataUri] of entries) {
-        // Use split/join for global replace (no regex escaping needed)
         html = html.split(url).join(dataUri);
       }
       console.log(`[proxy] Applied ${entries.length} image replacements to HTML`);
+      
+      await cdp.detach().catch(() => {});
     } catch (e) {
       console.log(`[proxy] Image capture failed: ${e.message}`);
     }
