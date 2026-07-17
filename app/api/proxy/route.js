@@ -1,10 +1,4 @@
-import { addExtra } from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import puppeteerCore from "puppeteer-core";
-
-// Wrap puppeteer-core with stealth plugin — patches 20+ bot detection vectors
-const puppeteer = addExtra(puppeteerCore);
-puppeteer.use(StealthPlugin());
+import puppeteer from "puppeteer-core";
 import { NextResponse } from "next/server";
 import fs from "fs";
 import { setCookiesForDomain } from "../../../lib/cookie-cache";
@@ -55,7 +49,13 @@ async function fetchWithBrowser(url) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
     
-    // Stealth plugin handles all anti-bot-detection automatically
+    // Anti-detection: hide Puppeteer from WAFs
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    });
 
     // Set extra headers to look more like a real browser
     await page.setExtraHTTPHeaders({
