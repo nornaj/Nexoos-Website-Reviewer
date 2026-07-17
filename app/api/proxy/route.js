@@ -425,6 +425,106 @@ async function fetchWithBrowser(url) {
       console.log(`[proxy] CSS Coverage: injected ${allCSS.length} CSS blocks, removed external links`);
     }
 
+    // ===== IMAGE CAPTURE: Convert images to data URIs in the browser context =====
+    // SiteGround's WAF rejects server-side fetch even with cookies (fingerprint check).
+    // But the browser has already solved the challenge, so fetching FROM the page works.
+    try {
+      const imageStats = await page.evaluate(async () => {
+        let converted = 0, failed = 0, skipped = 0;
+        const MAX_SIZE = 2 * 1024 * 1024; // 2MB per image
+        const MAX_TOTAL = 25 * 1024 * 1024; // 25MB total
+        let totalSize = 0;
+
+        async function fetchAsDataUri(url) {
+          if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.includes('/api/asset')) return null;
+          try {
+            const resp = await fetch(url, { credentials: 'include', cache: 'force-cache' });
+            if (!resp.ok) return null;
+            const ct = resp.headers.get('content-type') || '';
+            if (ct.includes('text/html')) return null; // Still a challenge page
+            const blob = await resp.blob();
+            if (blob.size > MAX_SIZE || (totalSize + blob.size) > MAX_TOTAL) return null;
+            totalSize += blob.size;
+            return await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            });
+          } catch { return null; }
+        }
+
+        // 1. Convert <img> src attributes
+        const imgs = document.querySelectorAll('img');
+        for (const img of imgs) {
+          const src = img.getAttribute('src');
+          if (!src || src.startsWith('data:')) { skipped++; continue; }
+          const dataUri = await fetchAsDataUri(src);
+          if (dataUri) {
+            img.setAttribute('src', dataUri);
+            img.removeAttribute('srcset');
+            img.removeAttribute('data-srcset');
+            converted++;
+          } else {
+            failed++;
+          }
+        }
+
+        // 2. Convert <source> srcset in <picture> elements
+        const sources = document.querySelectorAll('picture source[srcset]');
+        for (const source of sources) {
+          const srcset = source.getAttribute('srcset');
+          if (!srcset || srcset.startsWith('data:')) continue;
+          // Get the first URL from srcset
+          const firstUrl = srcset.split(/[,\s]/)[0];
+          if (firstUrl) {
+            const dataUri = await fetchAsDataUri(firstUrl);
+            if (dataUri) {
+              source.setAttribute('srcset', dataUri);
+              converted++;
+            }
+          }
+        }
+
+        // 3. Convert video poster images
+        const videos = document.querySelectorAll('video[poster]');
+        for (const video of videos) {
+          const poster = video.getAttribute('poster');
+          if (poster && !poster.startsWith('data:')) {
+            const dataUri = await fetchAsDataUri(poster);
+            if (dataUri) {
+              video.setAttribute('poster', dataUri);
+              converted++;
+            }
+          }
+        }
+
+        // 4. Convert CSS background-image url() in inline styles
+        const bgEls = document.querySelectorAll('[style]');
+        for (const el of bgEls) {
+          const style = el.getAttribute('style');
+          if (!style || !style.includes('url(')) continue;
+          const urlMatch = style.match(/url\(['"]?([^'")]+)['"]?\)/);
+          if (urlMatch && urlMatch[1] && !urlMatch[1].startsWith('data:')) {
+            const dataUri = await fetchAsDataUri(urlMatch[1]);
+            if (dataUri) {
+              el.setAttribute('style', style.replace(/url\(['"]?[^'")]+['"]?\)/, `url(${dataUri})`));
+              converted++;
+            }
+          }
+        }
+
+        return { converted, failed, skipped, totalKB: Math.round(totalSize / 1024) };
+      });
+
+      console.log(`[proxy] Image capture: ${imageStats.converted} converted, ${imageStats.failed} failed, ${imageStats.skipped} skipped (${imageStats.totalKB}KB total)`);
+      
+      // Re-capture HTML after image conversion
+      html = await page.content();
+    } catch (e) {
+      console.log(`[proxy] Image capture failed: ${e.message}`);
+    }
+
     // Extract and cache cookies from the browser session
     try {
       const cookies = await page.cookies();
