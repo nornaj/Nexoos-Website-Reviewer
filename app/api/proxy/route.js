@@ -1008,16 +1008,18 @@ function injectScripts(html, targetUrl, shouldStripScripts = false, proxyOrigin 
       height: 0 !important;
     }
     /* JS-dependent carousels/sliders: make items visible without JavaScript */
-    /* Slick slider */
+    /* Raw JetElements carousel (BEFORE Slick.js initializes — Slick classes don't exist) */
+    .jet-carousel .jet-carousel__items { display: flex !important; flex-wrap: wrap !important; overflow: visible !important; }
+    .jet-carousel .jet-carousel__item { display: block !important; flex: 0 0 33.33% !important; max-width: 33.33% !important; visibility: visible !important; opacity: 1 !important; }
+    .jet-carousel .jet-carousel__item-inner { display: block !important; visibility: visible !important; }
+    .jet-carousel .jet-carousel__content { display: block !important; visibility: visible !important; }
+    /* Slick slider (if somehow initialized) */
     .slick-track { display: flex !important; }
     .slick-slide { display: block !important; flex-shrink: 0; }
     .slick-list { overflow: hidden !important; }
-    /* JetElements carousel (uses Slick) */
-    .jet-carousel .slick-track { display: flex !important; }
-    .jet-carousel .slick-slide { display: block !important; width: auto !important; flex: 0 0 33.33%; max-width: 33.33%; }
     /* Swiper carousel (Elementor) */
     .swiper-wrapper { display: flex !important; }
-    .swiper-slide { display: block !important; flex-shrink: 0 !important; }
+    .swiper-slide { display: block !important; flex-shrink: 0 !important; visibility: visible !important; }
     /* Elementor carousel/slider */
     .elementor-slides .swiper-slide { display: block !important; }
     .elementor-image-carousel .swiper-slide { display: block !important; }
