@@ -21,18 +21,11 @@ export async function GET(request) {
       return new NextResponse(null, { status: 400 });
     }
     
-    // Build request headers — mimic a real browser image request
-    // SiteGround WAF checks Sec-Fetch-* headers and challenges requests without them
+    // Build request headers
     const headers = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "Referer": targetUrl.origin + "/",
-      "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-      "Sec-Fetch-Dest": "image",
-      "Sec-Fetch-Mode": "no-cors",
-      "Sec-Fetch-Site": "same-origin",
-      "Sec-Ch-Ua": "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"",
-      "Sec-Ch-Ua-Mobile": "?0",
-      "Sec-Ch-Ua-Platform": "\"Windows\"",
+      "Accept": "*/*",
     };
     
     // Include cached cookies from Puppeteer sessions to bypass SiteGround/Cloudflare

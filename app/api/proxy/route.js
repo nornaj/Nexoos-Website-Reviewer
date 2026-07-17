@@ -364,36 +364,13 @@ async function fetchWithBrowser(url) {
     try {
       const cdp = await page.createCDPSession();
       
-      // Get all image URLs from the DOM (img tags, CSS backgrounds, source elements)
+      // Get all image URLs from the DOM
       const imageUrls = await page.evaluate(() => {
         const urls = [];
-        // <img> elements
         document.querySelectorAll('img[src]').forEach(img => {
           const src = img.getAttribute('src');
           if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
             try { urls.push(new URL(src, window.location.href).href); } catch {}
-          }
-        });
-        // <source> inside <picture>
-        document.querySelectorAll('picture source[srcset]').forEach(source => {
-          const srcset = source.getAttribute('srcset');
-          if (srcset) {
-            srcset.split(',').forEach(s => {
-              const url = s.trim().split(/\s+/)[0];
-              if (url && !url.startsWith('data:')) {
-                try { urls.push(new URL(url, window.location.href).href); } catch {}
-              }
-            });
-          }
-        });
-        // CSS background-image in inline styles
-        document.querySelectorAll('[style]').forEach(el => {
-          const style = el.getAttribute('style') || '';
-          const matches = style.matchAll(/url\(['"]?([^'"\)]+)['"]?\)/g);
-          for (const m of matches) {
-            if (m[1] && !m[1].startsWith('data:') && !m[1].startsWith('blob:')) {
-              try { urls.push(new URL(m[1], window.location.href).href); } catch {}
-            }
           }
         });
         return [...new Set(urls)]; // Deduplicate
