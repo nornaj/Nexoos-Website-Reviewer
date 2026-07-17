@@ -4,10 +4,8 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 
-// Use /tmp on Vercel (serverless filesystem is read-only except /tmp)
-const CACHE_DIR = process.env.VERCEL
-  ? path.join("/tmp", "screenshots")
-  : path.join(process.cwd(), ".next", "cache", "screenshots");
+// Screenshot cache directory
+const CACHE_DIR = path.join(process.cwd(), ".next", "cache", "screenshots");
 
 function getCachePath(url, fullPage) {
   const key = fullPage ? `${url}__fullpage` : url;
@@ -69,41 +67,26 @@ export async function GET(request) {
 
   let browser;
   try {
-    const isDev = process.env.NODE_ENV === "development";
-
-    if (isDev) {
-      // Development: use locally installed Chrome
-      const executablePath = getLocalChromePath();
-      if (!executablePath) {
-        return NextResponse.json(
-          { error: "No local Chrome found. Install Google Chrome for thumbnails." },
-          { status: 500 }
-        );
-      }
-      browser = await puppeteer.launch({
-        headless: "shell",
-        executablePath,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-          "--disable-gpu",
-        ],
-        defaultViewport: { width: 1280, height: 800 },
-      });
-    } else {
-      // Production (Vercel): use Browserless.io cloud browser
-      const token = process.env.BROWSERLESS_TOKEN;
-      if (!token) {
-        return NextResponse.json(
-          { error: "BROWSERLESS_TOKEN is not set" },
-          { status: 500 }
-        );
-      }
-      browser = await puppeteer.connect({
-        browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}`,
-      });
+    // Use local Chrome (Railway, development)
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || getLocalChromePath();
+    if (!executablePath) {
+      return NextResponse.json(
+        { error: "No Chrome browser found. Set PUPPETEER_EXECUTABLE_PATH or install Chrome." },
+        { status: 500 }
+      );
     }
+    browser = await puppeteer.launch({
+      headless: "shell",
+      executablePath,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+      ],
+      defaultViewport: { width: 1280, height: 800 },
+    });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });

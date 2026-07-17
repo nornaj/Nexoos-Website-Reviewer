@@ -1,0 +1,11 @@
+node_modules
+.next
+.git
+.gitignore
+.env.local
+.vercel
+Images
+*.md
+vercel-css.txt
+vercel-editor-check.html
+artrabia-source.html

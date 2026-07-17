@@ -3,8 +3,6 @@ import { NextResponse } from "next/server";
 import fs from "fs";
 import { setCookiesForDomain } from "../../../lib/cookie-cache";
 
-// Vercel serverless config
-export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 // Find a locally installed Chrome for development
@@ -27,32 +25,24 @@ function getLocalChromePath() {
 
 // Fetch page HTML using a real headless browser (bypasses WAF/Cloudflare)
 async function fetchWithBrowser(url) {
-  const isDev = process.env.NODE_ENV === "development";
-  let browser;
-
-  if (isDev) {
-    // Development: use locally installed Chrome
-    const executablePath = getLocalChromePath();
-    if (!executablePath) throw new Error("No local Chrome found");
-    browser = await puppeteer.launch({
-      headless: "shell",
-      executablePath,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ],
-      defaultViewport: { width: 1280, height: 900 },
-    });
-  } else {
-    // Production (Vercel): use Browserless.io cloud browser with stealth mode
-    const token = process.env.BROWSERLESS_TOKEN;
-    if (!token) throw new Error("BROWSERLESS_TOKEN is not set");
-    browser = await puppeteer.connect({
-      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}&stealth&blockAds`,
-    });
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || getLocalChromePath();
+  if (!executablePath) {
+    throw new Error("No Chrome browser found. Set PUPPETEER_EXECUTABLE_PATH or install Chrome.");
   }
+
+  console.log(`[proxy] Using local Chrome: ${executablePath}`);
+  const browser = await puppeteer.launch({
+    headless: "shell",
+    executablePath,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-software-rasterizer",
+    ],
+    defaultViewport: { width: 1280, height: 900 },
+  });
 
   try {
     const page = await browser.newPage();
@@ -341,7 +331,7 @@ async function fetchWithBrowser(url) {
     // Scroll to trigger lazy-loaded content (CSS that loads on scroll)
     // Images are NOT inlined as data URIs — they will be proxied through /api/asset
     // by proxyAssetUrls() and the client-side script. This keeps the HTML response
-    // well under Vercel's 4.5MB response body limit.
+    // This keeps the HTML response small and lets images load in parallel.
     console.log(`[proxy] Scrolling to trigger lazy content for ${url}...`);
     await page.evaluate(async () => {
       const step = Math.max(window.innerHeight, 500);
