@@ -32,7 +32,7 @@ async function fetchWithBrowser(url) {
 
   console.log(`[proxy] Using local Chrome: ${executablePath}`);
   const browser = await puppeteer.launch({
-    headless: true, // Full rendering mode — images load with proper Sec-Fetch-Dest:image headers
+    headless: "shell", // Shell mode for low memory; images captured via CDP Network.loadNetworkResource
     executablePath,
     args: [
       "--no-sandbox",
@@ -354,96 +354,125 @@ async function fetchWithBrowser(url) {
     // Wait for lazy content to start loading
     await new Promise(r => setTimeout(r, 1500));
 
-    // ===== IMAGE INLINING: Convert images to base64 data URIs =====
-    // With headless:true, images are loaded normally by the browser's renderer.
-    // SiteGround WAF allows these (Sec-Fetch-Dest: image).
-    // We wait for images to finish loading, then read them via canvas.
-    // Canvas works in headless:true because images are actually rendered.
+    // Capture the page HTML first
+    let html = await page.content();
+
+    // ===== IMAGE INLINING via CDP Network.loadNetworkResource =====
+    // In headless:"shell", the browser doesn't render images (canvas fails, fetch gets WAF-challenged).
+    // CDP Network.loadNetworkResource loads through the browser's network stack with proper
+    // Sec-Fetch-Dest headers and cookies, bypassing WAF challenges.
+    // Each operation has a timeout to prevent the IO.read hang.
     try {
-      // Wait for all images to finish loading
-      await page.evaluate(async () => {
-        const images = Array.from(document.querySelectorAll('img'));
-        await Promise.all(images.map(img => {
-          if (img.complete) return Promise.resolve();
-          return new Promise(resolve => {
-            img.onload = resolve;
-            img.onerror = resolve;
-            setTimeout(resolve, 5000); // Max 5s per image
-          });
-        }));
+      const cdp = await page.createCDPSession();
+      
+      // Get all image URLs from the DOM
+      const imageUrls = await page.evaluate(() => {
+        const urls = [];
+        document.querySelectorAll('img[src]').forEach(img => {
+          const src = img.getAttribute('src');
+          if (src && !src.startsWith('data:') && !src.startsWith('blob:')) {
+            try { urls.push(new URL(src, window.location.href).href); } catch {}
+          }
+        });
+        return [...new Set(urls)]; // Deduplicate
       });
 
-      const inlineResult = await page.evaluate(async () => {
-        const images = Array.from(document.querySelectorAll('img'));
-        let converted = 0, failed = 0, skipped = 0;
+      console.log(`[proxy] Found ${imageUrls.length} image URLs to inline via CDP`);
 
-        const processImage = async (img) => {
-          const src = img.src;
-          if (!src || src.startsWith('data:') || !src.startsWith('http')) {
-            skipped++;
-            return;
-          }
+      let converted = 0, failed = 0;
+      const imageMap = {};
+      const MAX_TOTAL = 15 * 1024 * 1024; // 15MB max total
+      let totalSize = 0;
 
-          // Strategy 1: Canvas — read already-rendered image pixels (works in headless:true)
-          try {
-            if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
-              const canvas = document.createElement('canvas');
-              canvas.width = img.naturalWidth;
-              canvas.height = img.naturalHeight;
-              const ctx = canvas.getContext('2d');
-              ctx.drawImage(img, 0, 0);
-              const srcLower = src.toLowerCase();
-              let mime = 'image/png';
-              if (srcLower.includes('.jpg') || srcLower.includes('.jpeg')) mime = 'image/jpeg';
-              else if (srcLower.includes('.webp')) mime = 'image/webp';
-              const dataUrl = canvas.toDataURL(mime, 0.92);
-              if (dataUrl && dataUrl.length > 100) {
-                img.src = dataUrl;
-                img.removeAttribute('onerror');
-                if (img.hasAttribute('srcset')) img.removeAttribute('srcset');
-                converted++;
-                return;
-              }
-            }
-          } catch {}
+      // Helper: wrap any promise with a timeout
+      const withTimeout = (promise, ms) => Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+      ]);
 
-          // Strategy 2: Fetch with abort timeout (fallback for SVGs and failed canvas)
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 4000);
-            const response = await fetch(src, { signal: controller.signal });
-            clearTimeout(timeoutId);
-            if (!response.ok) { failed++; return; }
-            const blob = await response.blob();
-            if (blob.size === 0 || blob.size > 2 * 1024 * 1024 || blob.type.includes('text/html')) {
-              failed++;
-              return;
-            }
-            const dataUrl = await new Promise((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result);
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            });
-            img.src = dataUrl;
-            img.removeAttribute('onerror');
-            if (img.hasAttribute('srcset')) img.removeAttribute('srcset');
-            converted++;
-          } catch {
+      // Get the main frame ID for CDP
+      let frameId;
+      try {
+        const { frameTree } = await cdp.send('Page.getFrameTree');
+        frameId = frameTree.frame.id;
+      } catch {
+        frameId = page.mainFrame()._id;
+      }
+
+      for (const imgUrl of imageUrls) {
+        if (totalSize > MAX_TOTAL) break;
+        try {
+          // Load image through browser's network stack (uses cookies + proper headers)
+          const cdpResult = await withTimeout(
+            cdp.send('Network.loadNetworkResource', {
+              url: imgUrl,
+              frameId,
+              options: { disableCache: false, includeCredentials: true }
+            }),
+            5000 // 5s timeout per image
+          );
+
+          if (!cdpResult.resource || !cdpResult.resource.success || !cdpResult.resource.stream) {
             failed++;
+            continue;
           }
-        };
 
-        await Promise.all(images.map(img => processImage(img)));
-        return { converted, failed, skipped };
-      });
+          // Read the stream with timeout
+          const stream = cdpResult.resource.stream;
+          let data = '';
+          let base64Encoded = false;
+          try {
+            let eof = false;
+            let readCount = 0;
+            while (!eof && readCount < 50) { // Max 50 chunks (~50MB safety)
+              const chunk = await withTimeout(
+                cdp.send('IO.read', { handle: stream, size: 1024 * 1024 }),
+                3000 // 3s timeout per chunk
+              );
+              data += chunk.data;
+              base64Encoded = chunk.base64Encoded;
+              eof = chunk.eof;
+              readCount++;
+            }
+            await cdp.send('IO.close', { handle: stream }).catch(() => {});
+          } catch {
+            await cdp.send('IO.close', { handle: stream }).catch(() => {});
+            failed++;
+            continue;
+          }
 
-      console.log(`[proxy] Image inlining: ${inlineResult.converted} converted, ${inlineResult.failed} failed, ${inlineResult.skipped} skipped`);
+          if (!data || data.length === 0) { failed++; continue; }
+
+          // Detect MIME type
+          const headers = cdpResult.resource.headers || {};
+          let mime = headers['content-type'] || headers['Content-Type'] || 'image/png';
+          if (mime.includes(';')) mime = mime.split(';')[0].trim();
+          
+          // Skip if we got HTML back (WAF challenge page)
+          if (mime.includes('text/html')) { failed++; continue; }
+
+          // Build data URI
+          const b64 = base64Encoded ? data : Buffer.from(data, 'binary').toString('base64');
+          const dataUri = `data:${mime};base64,${b64}`;
+          imageMap[imgUrl] = dataUri;
+          totalSize += b64.length;
+          converted++;
+        } catch {
+          failed++;
+        }
+      }
+
+      console.log(`[proxy] Image inlining: ${converted} converted, ${failed} failed (${Math.round(totalSize / 1024)}KB total)`);
+
+      // Apply image replacements to the HTML
+      for (const [url, dataUri] of Object.entries(imageMap)) {
+        html = html.split(url).join(dataUri);
+      }
+
+      await cdp.detach().catch(() => {});
     } catch (e) {
       console.log(`[proxy] Image inlining failed: ${e.message}`);
     }
-
-    let html = await page.content();
     
     // Stop CSS coverage and use captured CSS to inline stylesheets
     // Coverage API captures the full CSS text for every stylesheet loaded by the browser,
