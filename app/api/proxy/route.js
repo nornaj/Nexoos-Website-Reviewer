@@ -354,6 +354,71 @@ async function fetchWithBrowser(url) {
     // Wait for lazy content to start loading
     await new Promise(r => setTimeout(r, 1500));
 
+    // ===== IMAGE INLINING: Convert images to base64 data URIs inside the page context =====
+    // Fetching from inside page.evaluate() inherits ALL WAF cookies (same-origin request).
+    // This bypasses CORS, WAF challenges, and headless:shell canvas limitations.
+    // Images become self-contained data URIs — no cross-origin requests needed on the client.
+    try {
+      const inlineResult = await page.evaluate(async () => {
+        const images = Array.from(document.querySelectorAll('img'));
+        let converted = 0, failed = 0, skipped = 0;
+        const MAX_SIZE = 2 * 1024 * 1024; // Skip images > 2MB
+
+        const fetchAsBase64 = async (img) => {
+          const src = img.src;
+          if (!src || src.startsWith('data:') || !src.startsWith('http')) {
+            skipped++;
+            return;
+          }
+
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout per image
+
+            const response = await fetch(src, { signal: controller.signal });
+            clearTimeout(timeoutId);
+
+            if (!response.ok) { failed++; return; }
+
+            // Check content-length before downloading large files
+            const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
+            if (contentLength > MAX_SIZE) { skipped++; return; }
+
+            const blob = await response.blob();
+            if (blob.size === 0 || blob.size > MAX_SIZE || blob.type.includes('text/html')) {
+              failed++;
+              return;
+            }
+
+            const dataUrl = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            });
+
+            img.src = dataUrl;
+            img.removeAttribute('onerror');
+            // Also clear srcset so browser doesn't try to load alternative sources
+            if (img.hasAttribute('srcset')) img.removeAttribute('srcset');
+            converted++;
+          } catch (error) {
+            failed++;
+            // Leave original absolute URL so client-side proxy can still try
+          }
+        };
+
+        // Process all images concurrently
+        await Promise.all(images.map(img => fetchAsBase64(img)));
+
+        return { converted, failed, skipped };
+      });
+
+      console.log(`[proxy] Image inlining: ${inlineResult.converted} converted, ${inlineResult.failed} failed, ${inlineResult.skipped} skipped`);
+    } catch (e) {
+      console.log(`[proxy] Image inlining failed: ${e.message}`);
+    }
+
     let html = await page.content();
     
     // Stop CSS coverage and use captured CSS to inline stylesheets
