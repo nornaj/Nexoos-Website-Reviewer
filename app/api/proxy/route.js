@@ -1,8 +1,9 @@
-import puppeteer from "puppeteer-extra";
+import { addExtra } from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import puppeteerCore from "puppeteer-core";
 
-// Apply stealth plugin — patches 20+ bot detection vectors
+// Wrap puppeteer-core with stealth plugin — patches 20+ bot detection vectors
+const puppeteer = addExtra(puppeteerCore);
 puppeteer.use(StealthPlugin());
 import { NextResponse } from "next/server";
 import fs from "fs";
@@ -37,7 +38,7 @@ async function fetchWithBrowser(url) {
 
   console.log(`[proxy] Using local Chrome: ${executablePath}`);
   const browser = await puppeteer.launch({
-    headless: true, // New headless — full browser, much harder for WAFs to detect
+    headless: "shell", // Use shell mode for lower memory (stealth plugin still works)
     executablePath,
     args: [
       "--no-sandbox",
