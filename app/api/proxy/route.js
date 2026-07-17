@@ -1278,6 +1278,7 @@ export async function GET(request) {
     const fwdHost = request.headers.get('x-forwarded-host') || request.headers.get('host');
     const fwdProto = request.headers.get('x-forwarded-proto') || 'https';
     const proxyOrigin = fwdHost ? `${fwdProto}://${fwdHost}` : new URL(request.url).origin;
+    console.log(`[proxy] proxyOrigin=${proxyOrigin} (fwdHost=${fwdHost}, fwdProto=${fwdProto}, reqUrl=${new URL(request.url).origin})`);
 
     // Strip scripts for JS framework sites (whether browser-rendered or fallback)
     // This prevents hydration failures in the iframe
